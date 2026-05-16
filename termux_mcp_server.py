@@ -1,5 +1,4 @@
-"""Backward-compatible shim — re-exports from the new modular structure."""
-import sys
+"""Backward-compatible shim — delegates to the new modular structure."""
 import warnings
 
 warnings.warn(
@@ -7,8 +6,6 @@ warnings.warn(
     DeprecationWarning, stacklevel=2,
 )
 
-from android_mcp import mcp
-from android_mcp.app import mcp as _mcp  # noqa: F401
-
-# Re-export module-level alias for scripts that do `from termux_mcp_server import mcp`
-sys.modules[__name__] = mcp  # type: ignore[assignment]
+from android_mcp import mcp as _mcp  # noqa: F401
+# Expose mcp at module level for `from termux_mcp_server import mcp`
+mcp = _mcp

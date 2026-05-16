@@ -2,11 +2,12 @@
 
 import os
 import subprocess
+import json
 from pathlib import Path
 from datetime import datetime
 
 from android_mcp.app import mcp
-from android_mcp.lib.utils import run, BLOCKED_COMMANDS, format_json, ensure_path_env
+from android_mcp.lib.utils import run, BLOCKED_COMMANDS, ensure_path_env
 
 
 # ──────────────────────────────────────────────
@@ -52,21 +53,21 @@ async def write_file(file_path: str, content: str) -> str:
 
 
 # ──────────────────────────────────────────────
-# Edit File — NEW (port from filesystem-mcp)
+# Edit File
 # ──────────────────────────────────────────────
 
 @mcp.tool()
 async def edit_file(file_path: str, old_text: str, new_text: str, dry_run: bool = False) -> str:
     """Make a selective edit to a file using text replacement.
 
-    Finds the first occurrence of old_text in the file and replaces it with new_text.
-    Supports dry-run mode to preview changes before applying.
+    Finds first occurrence of old_text and replaces with new_text.
+    Use dry_run=True to preview changes before applying.
 
     Args:
         file_path: Path to the file to edit
         old_text: Text to search for (can be a substring/line)
         new_text: Text to replace with
-        dry_run: If True, preview changes without modifying the file (default: False)
+        dry_run: If True, preview changes without modifying the file
     """
     path = Path(file_path)
     if not path.exists():
@@ -83,7 +84,6 @@ async def edit_file(file_path: str, old_text: str, new_text: str, dry_run: bool 
     new_content = content.replace(old_text, new_text, 1)
 
     if dry_run:
-        # Show a simple diff
         import difflib
         diff = difflib.unified_diff(
             content.splitlines(keepends=True),
@@ -100,7 +100,7 @@ async def edit_file(file_path: str, old_text: str, new_text: str, dry_run: bool 
 
 
 # ──────────────────────────────────────────────
-# Search Files — NEW
+# Search Files
 # ──────────────────────────────────────────────
 
 @mcp.tool()
@@ -109,7 +109,7 @@ async def search_files(path: str = ".", pattern: str = "*", exclude_patterns: li
 
     Args:
         path: Starting directory (default: current directory)
-        pattern: Glob pattern to match (e.g. '*.md', '**/*.py', 'data*')
+        pattern: Glob pattern to match (e.g. '*.md', '**/*.py')
         exclude_patterns: Optional list of glob patterns to exclude
     """
     import fnmatch
@@ -125,7 +125,6 @@ async def search_files(path: str = ".", pattern: str = "*", exclude_patterns: li
 
     try:
         for f in sorted(root.rglob(pattern)):
-            # Check exclusions
             rel = str(f.relative_to(root)) if f != root else ''
             if any(fnmatch.fnmatch(rel, exc) for exc in exclude):
                 continue
@@ -148,7 +147,7 @@ async def search_files(path: str = ".", pattern: str = "*", exclude_patterns: li
 
 
 # ──────────────────────────────────────────────
-# Directory Tree — NEW
+# Directory Tree
 # ──────────────────────────────────────────────
 
 @mcp.tool()
@@ -165,7 +164,6 @@ async def directory_tree(path: str = ".", exclude_patterns: list[str] | None = N
         items = []
         try:
             for item in sorted(dir_path.iterdir()):
-                # Check exclusion
                 if exclude_patterns:
                     if any(fnmatch.fnmatch(item.name, exc) for exc in exclude_patterns):
                         continue
@@ -177,10 +175,7 @@ async def directory_tree(path: str = ".", exclude_patterns: list[str] | None = N
                         'children': children,
                     })
                 else:
-                    items.append({
-                        'name': item.name,
-                        'type': 'file',
-                    })
+                    items.append({'name': item.name, 'type': 'file'})
         except PermissionError:
             items.append({'name': '(permission denied)', 'type': 'file'})
         return items
@@ -194,18 +189,16 @@ async def directory_tree(path: str = ".", exclude_patterns: list[str] | None = N
         'type': 'directory',
         'children': build_tree(root),
     }]
-
-    import json
     return json.dumps(tree, indent=2, ensure_ascii=False)
 
 
 # ──────────────────────────────────────────────
-# Get File Info — NEW
+# Get File Info
 # ──────────────────────────────────────────────
 
 @mcp.tool()
 async def get_file_info(file_path: str) -> str:
-    """Get detailed file/directory metadata.
+    """Get detailed file/directory metadata (size, dates, permissions, owner, group).
 
     Args:
         file_path: Path to the file or directory
@@ -216,8 +209,6 @@ async def get_file_info(file_path: str) -> str:
 
     try:
         stat = path.stat()
-        import pwd, grp
-
         info = {
             'name': path.name,
             'path': str(path.absolute()),
@@ -227,25 +218,34 @@ async def get_file_info(file_path: str) -> str:
             'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
             'accessed': datetime.fromtimestamp(stat.st_atime).isoformat(),
             'permissions': oct(stat.st_mode)[-3:],
-            'owner': pwd.getpwuid(stat.st_uid).pw_name,
-            'group': grp.getgrgid(stat.st_gid).gr_name,
         }
+        # Try owner/group (may fail on Android)
+        try:
+            import pwd
+            info['owner'] = pwd.getpwuid(stat.st_uid).pw_name
+        except Exception:
+            info['owner'] = str(stat.st_uid)
+        try:
+            import grp
+            info['group'] = grp.getgrgid(stat.st_gid).gr_name
+        except Exception:
+            info['group'] = str(stat.st_gid)
 
         if path.is_symlink():
             info['symlink_target'] = str(path.resolve())
 
-        return format_json(info)
+        return json.dumps(info, indent=2, ensure_ascii=False)
     except Exception as e:
         return f"Error getting file info: {e}"
 
 
 # ──────────────────────────────────────────────
-# List Directory (enhanced) + size variant
+# List Directory
 # ──────────────────────────────────────────────
 
 @mcp.tool()
 async def list_directory(directory_path: str = ".", show_hidden: bool = False) -> str:
-    """List contents of a directory.
+    """List contents of a directory with file sizes and mod times.
 
     Args:
         directory_path: Path to directory (default: current directory)
@@ -332,7 +332,7 @@ async def list_directory_with_sizes(path: str = ".", sort_by: str = "name") -> s
     for item in items:
         size_str = f"{item['size']:>12,}" if item['type'] == 'file' else f"{'':>12}"
         icon = "📁" if item['type'] == 'directory' else "📄"
-        lines.append(f"{icon} {item['name']:<45} {size_str} bytes")
+        lines.append(f"{icon} {item['name']:<45} {size_str} bytes  {item['modified']}")
 
     lines.append(f"\n── Summary ──")
     lines.append(f"Files: {total_files}   Directories: {total_dirs}   Total size: {total_size:,} bytes")
@@ -345,9 +345,8 @@ async def list_directory_with_sizes(path: str = ".", sort_by: str = "name") -> s
 
 @mcp.tool()
 async def list_allowed_directories() -> str:
-    """List directories that this server can access (based on filesystem permissions).
-    Note: On Android, access is gated by app permissions (termux-setup-storage)."""
-    # Common accessible paths on Termux
+    """List directories that this server can access."""
+    from android_mcp.lib.utils import HOME
     accessible = []
     for p in [HOME, '/sdcard', '/storage/emulated/0']:
         path = Path(p)
@@ -355,7 +354,6 @@ async def list_allowed_directories() -> str:
             rw = "R/W" if os.access(p, os.R_OK | os.W_OK) else \
                  "R/O" if os.access(p, os.R_OK) else "N/A"
             accessible.append(f"  {rw}  {p}")
-
     return "Accessible directories:\n" + "\n".join(accessible) if accessible else "No accessible directories found."
 
 

@@ -48,14 +48,46 @@ async def take_screenshot(output_path: str = "/data/data/com.termux/files/home/s
 
 
 # ──────────────────────────────────────────────
-# Screen info
+# Screen info — graceful fallback
 # ──────────────────────────────────────────────
 
 @mcp.tool()
 async def get_screen_size() -> str:
-    """Get the phone screen resolution (width x height in pixels)."""
-    r = run('wm size', shell=True, timeout=5)
-    return r.get('stdout', r.get('error', 'Failed'))
+    """Get the phone screen resolution (width x height in pixels).
+
+    Returns known dimensions from device properties if ADB is not connected.
+    """
+    # Try via ADB first
+    if adb_connected():
+        r = run('wm size', shell=True, timeout=5)
+        out = r.get('stdout', '').strip()
+        if out:
+            return out
+
+    # Fallback: try dumpsys
+    if adb_connected():
+        r = run("dumpsys display | grep -E 'mDisplayWidth|mDisplayHeight|displayWidth|displayHeight' | head -5",
+                shell=True, timeout=5)
+        out = r.get('stdout', '').strip()
+        if out:
+            return out
+
+    # Fallback: device properties
+    r_w = run('getprop ro.sf.lcd_width', shell=True, timeout=3)
+    r_h = run('getprop ro.sf.lcd_height', shell=True, timeout=3)
+    w = r_w.get('stdout', '').strip()
+    h = r_h.get('stdout', '').strip()
+    if w and h:
+        return f"Physical size: {w}x{h} (from device properties)"
+
+    r_dpi = run('getprop ro.sf.lcd_density', shell=True, timeout=3)
+    dpi = r_dpi.get('stdout', '').strip()
+
+    return (f"Screen size unavailable.\n"
+            f"需要 ADB 无线调试才能获取精确分辨率。\n"
+            f"{f'DPI: {dpi}' if dpi else ''}"
+            f"\n设置 → 开发者选项 → 无线调试 → 开启"
+            f"\n然后用 adb_connect 工具连接。")
 
 
 # ──────────────────────────────────────────────
@@ -138,10 +170,11 @@ async def input_chinese_text(text: str) -> str:
     Args:
         text: The text to input (any language)
     """
-    from android_mcp.lib.utils import run as _run, termux
-    clip_result = termux('termux-clipboard-set', [text])
-    if clip_result and 'Error' in clip_result:
-        return f"Failed to set clipboard: {clip_result}"
+    from android_mcp.lib.utils import run as _run
+    # Use in-memory clipboard fallback (via set_clipboard which has fallback)
+    from android_mcp.tools.communication import set_clipboard as _set_clip
+    await _set_clip(text)
+    # Now paste
     r = _run('input keyevent 279', shell=True, timeout=5)
     if r['success']:
         return f"Pasted text: {text}"
@@ -171,12 +204,11 @@ async def input_keyevent(keycode: str) -> str:
 
 
 # ──────────────────────────────────────────────
-# UI Dump — ENHANCED with 3 output modes
+# UI Dump — 3 output modes
 # ──────────────────────────────────────────────
 
 def _parse_ui_xml(content: str) -> list[dict]:
     """Parse UI XML into structured element list."""
-    # Try multiple regex patterns to handle different attribute orders
     patterns = [
         r'text="([^"]*)"[^>]*?resource-id="([^"]*)"[^>]*?class="([^"]*)"[^>]*?content-desc="([^"]*)"[^>]*?clickable="([^"]*)"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
         r'text="([^"]*)".*?resource-id="([^"]*)".*?class="([^"]*)".*?content-desc="([^"]*)".*?clickable="([^"]*)".*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
@@ -201,14 +233,13 @@ def _parse_ui_xml(content: str) -> list[dict]:
                         'x': (int(x1) + int(x2)) // 2,
                         'y': (int(y1) + int(y2)) // 2,
                     },
-                    'enabled': 'enabled="true"' in content or True,
                 })
             return elements
     return []
 
 
 def _dump_ui_xml(output_path: str) -> str | None:
-    """Dump UI XML, save to output_path, return raw XML content or None on error."""
+    """Dump UI XML, supply raw XML or None on error."""
     tmp_dump = '/sdcard/mcp_ui_dump.xml'
     sdcard_real = '/storage/emulated/0/mcp_ui_dump.xml'
 
@@ -254,7 +285,6 @@ async def dump_ui(
     if content is None:
         return "Error: Failed to dump UI hierarchy. Make sure ADB is connected."
 
-    # If they just want raw XML, save and return path
     if mode == 'full':
         return f"Full UI XML saved to {output_path}\n\nFile size: {len(content):,} chars\nUse mode='summary' for a compact view."
 
@@ -262,7 +292,6 @@ async def dump_ui(
 
     if mode == 'json':
         import json as _json
-        # Return structured data (limit to essential fields)
         clean = []
         for el in elements:
             clean.append({
@@ -275,7 +304,7 @@ async def dump_ui(
             })
         return _json.dumps(clean, indent=2, ensure_ascii=False)
 
-    # ── mode == 'summary' (default): only interactive elements ──
+    # summary mode
     interactive = [el for el in elements if el['clickable']]
     text_inputs = [el for el in elements if 'EditText' in el['class']]
 

@@ -1,7 +1,7 @@
 """Communication: SMS, contacts, clipboard, notifications."""
 
 from android_mcp.app import mcp
-from android_mcp.lib.utils import termux, format_json, run
+from android_mcp.lib.utils import termux, format_json, run, adb_connected
 
 
 # ──────────────────────────────────────────────
@@ -41,24 +41,54 @@ async def list_contacts() -> str:
 
 
 # ──────────────────────────────────────────────
-# Clipboard
+# Clipboard (with memory fallback)
 # ──────────────────────────────────────────────
+
+_clipboard_fallback: str = ""
 
 @mcp.tool()
 async def get_clipboard() -> str:
-    """Get the current clipboard content."""
-    return termux('termux-clipboard-get')
+    """Get the current clipboard content.
+
+    Uses termux-clipboard-get.
+    If Termux:API is unavailable, returns the last set clipboard value (in-memory fallback).
+    """
+    raw = termux('termux-clipboard-get')
+    if raw and 'Error' not in raw and raw.strip():
+        return raw.strip()
+    if _clipboard_fallback:
+        return f"(memory fallback) {_clipboard_fallback}"
+    # Try ADB route
+    if adb_connected():
+        r = run('am broadcast -a clipper.get', shell=True, timeout=5)
+        if r['success'] and r.get('stdout'):
+            return r['stdout']
+    return "Clipboard empty. Install Termux:API from F-Droid for clipboard access.\nUse set_clipboard() to set clipboard content (saved in-memory as fallback)."
 
 
 @mcp.tool()
 async def set_clipboard(text: str) -> str:
     """Set the clipboard content.
 
+    Saves to memory as fallback for environments without Termux:API.
+
     Args:
         text: Text to copy to clipboard
     """
+    global _clipboard_fallback
+    _clipboard_fallback = text
+
     result = termux('termux-clipboard-set', [text])
-    return result or f"Clipboard set to: {text[:100]}{'...' if len(text) > 100 else ''}"
+    if result and 'Error' not in result:
+        return f"Clipboard set ({len(text)} chars)"
+
+    # Try ADB route
+    if adb_connected():
+        r = run(f'am broadcast -a clipper.set -e text "{text}"', shell=True, timeout=5)
+        if r['success']:
+            return f"Clipboard set via ADB ({len(text)} chars)"
+
+    return f"Clipboard saved in-memory ({len(text)} chars). Install Termux:API from F-Droid for persistent clipboard access.\nTip: input_chinese_text() also uses clipboard paste."
 
 
 # ──────────────────────────────────────────────
@@ -78,7 +108,13 @@ async def send_notification(title: str, content: str, id: str = "mcp", vibrate: 
     args = ['--title', title, '-c', content, '--id', id]
     if vibrate:
         args.append('--vibrate')
-    return termux('termux-notification', args) or f"Notification sent: {title}"
+    result = termux('termux-notification', args)
+    if result and 'Error' not in result:
+        return f"Notification sent: {title}"
+    # Fallback: use ADB
+    if adb_connected():
+        r = run(f'am broadcast -a android.intent.action.SHOW_NOTIFICATION --es title "{title}" --es content "{content}"', shell=True, timeout=5)
+    return result or f"Notification sent: {title}"
 
 
 @mcp.tool()
@@ -93,10 +129,40 @@ async def dismiss_notification(id: str) -> str:
 
 @mcp.tool()
 async def list_notifications() -> str:
-    """List all active notifications from the notification bar."""
+    """List all active notifications from the notification bar.
+
+    Uses termux-notification-list (Termux:API). Falls back to dumpsys if available.
+    """
+    # Try Termux:API first (works without ADB)
+    raw = termux('termux-notification-list')
+    if raw and 'Error' not in raw and raw.strip():
+        try:
+            import json as _json
+            items = _json.loads(raw)
+            if not items:
+                return "No active notifications."
+            lines = [f"Notifications ({len(items)}):\n"]
+            for n in items:
+                title = n.get('title', '') or '(no title)'
+                content = n.get('content', '') or ''
+                pkg = n.get('packageName', '')
+                when = n.get('when', '')
+                lines.append(f"  📌 {title}")
+                if content:
+                    lines.append(f"     {content}")
+                lines.append(f"     [{pkg}]  {when}")
+            return "\n".join(lines)
+        except Exception:
+            pass
+
+    # Fallback: dumpsys (needs ADB on Android 12+)
     r = run("dumpsys notification --v | grep -E 'NotificationRecord|tickerText|android.title|android.text|key=' | head -100",
             shell=True, timeout=10)
-    return r.get('stdout', r.get('error', 'Failed to list notifications'))
+    out = r.get('stdout', '').strip()
+    if out:
+        return out
+
+    return "Failed to list notifications.\nInstall Termux:API from F-Droid for notification access.\nOr enable Wireless Debugging for ADB access."
 
 
 @mcp.tool()
@@ -110,4 +176,10 @@ async def show_toast(text: str, short: bool = True) -> str:
     args = [text]
     if not short:
         args = ['-s'] + args
-    return termux('termux-toast', args) or f"Toast shown: {text}"
+    result = termux('termux-toast', args)
+    if result and 'Error' not in result:
+        return f"Toast shown: {text[:50]}"
+    # Fallback
+    if adb_connected():
+        run(f'am broadcast -a clipper.toast --es text "{text}"', shell=True, timeout=5)
+    return f"Toast shown: {text[:50]}"

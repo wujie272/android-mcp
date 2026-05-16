@@ -1,7 +1,7 @@
 """System Control: volume, torch, vibrate, TTS, brightness, fingerprint."""
 
 from android_mcp.app import mcp
-from android_mcp.lib.utils import termux, format_json, run
+from android_mcp.lib.utils import termux, format_json, run, adb_connected
 
 
 @mcp.tool()
@@ -66,19 +66,48 @@ async def get_fingerprint() -> str:
 
 @mcp.tool()
 async def get_screen_brightness() -> str:
-    """Get current screen brightness level."""
-    r = run('settings get system screen_brightness', shell=True, timeout=5)
+    """Get current screen brightness level.
+
+    Requires ADB wireless debugging enabled on Android 12+.
+    """
+    # Try via ADB if connected (settings command needs system permissions)
+    if adb_connected():
+        r = run('settings get system screen_brightness', shell=True, timeout=5)
+        val = r.get('stdout', '').strip()
+        if val:
+            return f"Screen brightness: {val}/255"
+        # Try dumpsys as fallback
+        r = run("dumpsys display | grep -i brightness | head -5", shell=True, timeout=5)
+        if r.get('stdout', '').strip():
+            return r['stdout']
+
+    # Try getprop (works without ADB on some ROMs)
+    r = run('getprop ro.sf.lcd_brightness', shell=True, timeout=3)
     val = r.get('stdout', '').strip()
-    return f"Screen brightness: {val}/255" if val else r.get('error', 'Failed')
+    if val:
+        return f"Screen brightness: {val} (from getprop)"
+
+    return ("Screen brightness: unknown.\n"
+            "Wireless Debugging 未启用。需要 ADB 连接才能查询亮度。\n"
+            "设置 → 开发者选项 → 无线调试 → 开启\n"
+            "然后用 adb_connect 工具连接。")
 
 
 @mcp.tool()
 async def set_screen_brightness(level: int) -> str:
     """Set screen brightness level.
 
+    Requires ADB wireless debugging enabled on Android 12+.
+
     Args:
         level: Brightness level 0-255
     """
     level = max(0, min(255, level))
-    r = run(f'settings put system screen_brightness {level}', shell=True, timeout=5)
-    return r.get('stdout', '') or f"Brightness set to {level}/255"
+    if adb_connected():
+        r = run(f'settings put system screen_brightness {level}', shell=True, timeout=5)
+        if r['success']:
+            return f"Brightness set to {level}/255"
+        return f"Error: {r.get('stderr', 'ADB command failed')}"
+    return ("无法设置亮度：需要 ADB 无线调试。\n"
+            "设置 → 开发者选项 → 无线调试 → 开启\n"
+            "然后用 adb_connect 工具连接。")
