@@ -1,163 +1,113 @@
-# Termux MCP Server
+# 📱 android-mcp
 
-通过 MCP 协议让 Claude Desktop 远程控制 Android 手机。运行在 Termux 上，提供 **45+ 工具**，支持 UI 自动化操作。
+通过 MCP 协议让 AI 助手直接控制你的 Android 手机。运行在 Termux 上，提供 **65+ 工具**，覆盖 UI 自动化、文件系统、设备控制、通信等。
 
-## 功能
+由 [xlisp/termux-mcp-server](https://github.com/xlisp/termux-mcp-server) fork 重构而来。
 
-| 分类 | 工具 | 说明 |
-|------|------|------|
-| 📱 设备信息 | `get_battery_status` `get_device_info` `get_storage_info` | 电池、型号、存储 |
-| 📍 定位 | `get_location` | GPS/网络定位 |
-| 📶 网络 | `get_wifi_info` `scan_wifi` `get_telephony_info` | WiFi、蜂窝网络 |
-| 📦 应用 | `list_android_packages` `open_app` `open_url` `get_current_app` | 查看/启动应用 |
-| 🖥️ UI自动化 | `take_screenshot` `dump_ui` `tap_screen` `swipe_screen` `find_and_tap` | **核心：控制任意App** |
-| ⌨️ 输入 | `input_text` `input_chinese_text` `input_keyevent` `long_press` | 打字、按键、长按 |
-| 🏠 导航 | `go_home` `go_back` `open_recent_apps` | Home/返回/最近 |
-| 📷 相机/图片 | `take_photo` `get_camera_info` `list_photos` `read_photo` | 拍照、浏览图片 |
-| 💬 通信 | `list_sms` `send_sms` `list_contacts` | 短信、通讯录 |
-| 📋 剪贴板 | `get_clipboard` `set_clipboard` | 读写剪贴板 |
-| 🔔 通知 | `send_notification` `show_toast` | 发送通知/Toast |
-| 🔊 系统控制 | `set_volume` `get_volume` `toggle_torch` `vibrate` | 音量、手电筒、震动 |
-| 🗣️ TTS | `text_to_speech` | 文字转语音 |
-| 🎵 媒体 | `media_player` | 播放/暂停/停止音频 |
-| 📁 文件 | `list_directory` `read_file` `write_file` | 文件读写 |
-| ⚡ 命令 | `execute_command` | 执行Shell命令 |
-| 🔆 屏幕 | `get_screen_brightness` `set_screen_brightness` `get_screen_size` | 屏幕亮度/分辨率 |
-| 📡 传感器 | `get_sensor_list` `read_sensor` | 读取传感器数据 |
-| 🔗 分享 | `share_file` `download_file` | 分享/下载文件 |
-| 🔐 生物识别 | `get_fingerprint` | 指纹认证 |
+## 🆕 v0.2 改进
 
-## UI 自动化：控制任意 App
+- **模块化重构** — 单文件 41KB → 7 个工具模块 + lib 层，易维护易扩展
+- **dump_ui 三模式** — `summary`（默认，节省 80% token）/ `full` / `json`
+- **文件操作增强** — 新增 `edit_file` / `search_files` / `directory_tree` / `get_file_info` / `list_directory_with_sizes`
+- **应用管理** — 新增 `force_stop_app` / `app_usage_stats`
+- **通知管理** — 新增 `list_notifications` / `dismiss_notification`
+- **45 → 65 工具** — 新增 20 个工具
 
-**核心能力**：通过截图 → 分析 → 点击的循环，可以操控手机上任意应用。
+## 🎯 功能一览
 
-### 工作流程
+| 分类 | 工具数 | 说明 |
+|------|:------:|------|
+| 📱 设备信息 | 9 | 电池、WiFi、基站、GPS、传感器、型号、存储 |
+| 🖥️ UI 自动化 | 11 | 截图、`dump_ui`(三模式)、点击、滑动、输入、按键、导航 |
+| 📁 文件系统 | 9 | 读/写/编辑、搜索、目录树、元数据、Shell 执行 |
+| 📦 应用管理 | 7 | 列应用/进程、启动/停止、打开 URL、使用统计 |
+| 💬 通信 | 8 | 短信、通讯录、剪贴板、通知(发/读/删) |
+| 🔊 系统控制 | 8 | 音量、手电筒、震动、TTS、亮度、指纹 |
+| 📷 媒体 | 7 | 拍照、浏览相册、媒体播放、分享、下载 |
+| 🔌 ADB | 3 | 无线调试连接/管理/状态 |
+| 📍 其他 | 3 | 定位、传感器、存储信息 |
 
-```
-take_screenshot → Claude 看到屏幕内容
-      ↓
-dump_ui        → 获取所有UI元素及坐标
-      ↓
-tap_screen     → 点击目标位置
-input_text     → 输入文字
-      ↓
-take_screenshot → 确认操作结果，继续下一步
-```
+## 🚀 快速开始
 
-### 示例：用微信给某人发消息
-
-Claude 会自动执行以下步骤：
-1. `open_app("com.tencent.mm")` — 打开微信
-2. `take_screenshot()` — 查看当前屏幕
-3. `dump_ui()` — 获取UI元素坐标
-4. `find_and_tap("通讯录")` — 点击通讯录
-5. `find_and_tap("搜索")` — 点击搜索框
-6. `input_chinese_text("张三")` — 输入联系人名字
-7. `find_and_tap("张三")` — 点击搜索结果
-8. `find_and_tap("发消息")` — 点击发消息
-9. `tap_screen(x, y)` — 点击输入框
-10. `input_chinese_text("你好，明天几点见面？")` — 输入消息
-11. `find_and_tap("发送")` — 发送
-
-你只需要对 Claude 说："**打开微信给张三发消息说明天几点见面**"，Claude 会自动完成以上全部步骤。
-
-## 安装
-
-### 1. 手机端 (Termux)
+### 1. 安装
 
 ```bash
-# 安装依赖
-pkg install python termux-api
-
-# 安装 Termux:API app (从 F-Droid)
-# https://f-droid.org/packages/com.termux.api/
-
-# 授予存储权限
-termux-setup-storage
-
-# 进入项目目录
-cd ~/pypro/termux-mcp-server
-
-# 创建虚拟环境并安装
-python -m venv .venv
-source .venv/bin/activate
+# 手机端 Termux
+pkg install python android-tools termux-api
 pip install "mcp[cli]"
 
-# 测试运行
-python termux_mcp_server.py
+# 从 F-Droid 安装 Termux:API app
+# 授予存储权限
+termux-setup-storage
 ```
 
-### 2. 远程连接 (SSH)
-
-手机端启动 SSH 服务供电脑连接：
+### 2. 运行
 
 ```bash
-pkg install openssh
-sshd  # 默认端口 8022
-whoami  # 记住用户名
-passwd  # 设置密码
-ifconfig  # 记住IP地址
+# 标准模式 (stdio)
+cd ~/mcp-servers/android-mcp
+python3 server.py
+
+# HTTP 模式 (SSE, 端口 3000)
+python3 http_server.py
 ```
 
-### 3. 电脑端 Claude Desktop 配置
-
-编辑 `claude_desktop_config.json`：
+### 3. Claude Desktop 配置
 
 ```json
 {
   "mcpServers": {
-    "termux": {
+    "android-mcp": {
       "command": "ssh",
       "args": [
         "-p", "8022",
         "u0_a123@192.168.1.100",
-        "/data/data/com.termux/files/home/pypro/termux-mcp-server/.venv/bin/python",
-        "/data/data/com.termux/files/home/pypro/termux-mcp-server/termux_mcp_server.py"
+        "cd ~/mcp-servers/android-mcp && python3 server.py"
       ]
     }
   }
 }
 ```
 
-> 将 `u0_a123` 替换为 `whoami` 输出，`192.168.1.100` 替换为手机IP。
+> 免密登录：`ssh-keygen` → `ssh-copy-id -p 8022 u0_a123@192.168.1.100`
 
-**免密登录（推荐）：**
-```bash
-# 电脑端
-ssh-keygen -t ed25519
-ssh-copy-id -p 8022 u0_a123@192.168.1.100
+## 🖥️ UI 自动化工作流
+
+```
+take_screenshot → AI 看到屏幕内容
+      ↓
+dump_ui(mode='summary') → 获取可交互元素及坐标 (节省 80% token)
+      ↓
+tap_screen(x, y) → 点击目标位置
+input_text("内容") → 输入文字
+      ↓
+take_screenshot → 确认结果，继续下一步
 ```
 
-## 使用示例
+## 🏗️ 项目结构
 
-连接成功后，可以在 Claude Desktop 中直接说：
-
-**基础操作：**
-- "查看手机电量"
-- "手机现在连着什么WiFi"
-- "拍一张照片"
-- "打开手电筒"
-- "手机在哪里"（GPS定位）
-
-**App 控制（UI 自动化）：**
-- "打开微信给张三发消息说明天见"
-- "帮我打开抖音"
-- "截个屏让我看看手机画面"
-- "点击屏幕上的xxx按钮"
-- "在当前输入框输入xxx"
-
-**通信：**
-- "给 13800138000 发短信说我到了"
-- "查看最近的短信"
-- "查看通讯录"
-
-**系统控制：**
-- "把手机音量调到5"
-- "用手机说一句你好"
-- "手机震动一下"
-
-## 测试
-
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | python termux_mcp_server.py
 ```
+android-mcp/
+├── server.py                  # 入口 (stdio)
+├── http_server.py             # HTTP/SSE 入口
+├── termux_mcp_server.py       # 兼容 shim (旧脚本仍可用)
+├── pyproject.toml
+├── android_mcp/
+│   ├── app.py                 # FastMCP 实例
+│   ├── lib/
+│   │   ├── utils.py           # 命令执行、Termux API 包装
+│   │   └── adb.py             # ADB 连接管理
+│   └── tools/
+│       ├── device_info.py     # 电池/WiFi/定位/传感器
+│       ├── ui_automation.py   # 截图/dump_ui/点击/输入
+│       ├── file_system.py     # 文件读/写/编辑/搜索/树
+│       ├── app_management.py  # 应用/进程/包管理
+│       ├── communication.py   # 短信/通讯录/剪贴板/通知
+│       ├── system_control.py  # 音量/手电筒/震动/TTS
+│       └── media.py           # 相机/相册/播放器/分享
+└── scripts/                   # 工具脚本
+```
+
+## 📄 许可
+
+MIT — 基于 [xlisp/termux-mcp-server](https://github.com/xlisp/termux-mcp-server)
