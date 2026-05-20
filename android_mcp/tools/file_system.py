@@ -1,13 +1,18 @@
-"""File System: read, write, edit, search, tree, directory listing, info, execution."""
+"""File System: read, write, edit, search, tree, directory listing, info, execution.
+
+优化日志 v2.0:
+  - execute_command 改为 async_run 异步执行，不再阻塞事件循环
+  - 所有工具添加 try/except 异常保护
+  - 添加全局超时兜底
+"""
 
 import os
-import subprocess
 import json
 from pathlib import Path
 from datetime import datetime
 
 from android_mcp.app import mcp
-from android_mcp.lib.utils import run, BLOCKED_COMMANDS, ensure_path_env
+from android_mcp.lib.utils import async_run, BLOCKED_COMMANDS, ensure_path_env
 
 
 # ──────────────────────────────────────────────
@@ -21,18 +26,21 @@ async def read_file(file_path: str) -> str:
     Args:
         file_path: Path to the file to read
     """
-    path = Path(file_path)
-    if not path.exists():
-        return f"Error: File not found: {file_path}"
-    if path.stat().st_size > 10 * 1024 * 1024:
-        return f"Error: File too large ({path.stat().st_size:,} bytes)"
+    try:
+        path = Path(file_path)
+        if not path.exists():
+            return f"Error: File not found: {file_path}"
+        if path.stat().st_size > 10 * 1024 * 1024:
+            return f"Error: File too large ({path.stat().st_size:,} bytes)"
 
-    for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
-        try:
-            return path.read_text(encoding=enc)
-        except UnicodeDecodeError:
-            continue
-    return f"Error: Cannot decode file with supported encodings"
+        for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
+            try:
+                return path.read_text(encoding=enc)
+            except UnicodeDecodeError:
+                continue
+        return f"Error: Cannot decode file with supported encodings"
+    except Exception as e:
+        return f"Error reading file: {e}"
 
 
 @mcp.tool()
@@ -49,7 +57,7 @@ async def write_file(file_path: str, content: str) -> str:
         path.write_text(content, encoding='utf-8')
         return f"Written {len(content)} chars to {file_path}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"❌ 写入文件失败: {e}"
 
 
 # ──────────────────────────────────────────────
@@ -362,7 +370,7 @@ async def list_allowed_directories() -> str:
 # ──────────────────────────────────────────────
 
 @mcp.tool()
-async def execute_command(command: str, working_directory: str = ".", timeout: int = 30) -> str:
+async def execute_command(command: str | None = None, working_directory: str = ".", timeout: int = 30) -> str:
     """Execute a shell command on the phone.
 
     Args:
@@ -370,25 +378,22 @@ async def execute_command(command: str, working_directory: str = ".", timeout: i
         working_directory: Working directory (default: current)
         timeout: Timeout in seconds (default: 30)
     """
+    if not command or not command.strip():
+        return ("❌ 错误：`command` 参数不能为空。\n"
+                "请这样调用：execute_command(command='ls -la', working_directory='.', timeout=30)\n"
+                "或者直接告诉我你想执行什么命令。")
     cmd_parts = command.strip().split()
     if cmd_parts and cmd_parts[0].lower() in BLOCKED_COMMANDS:
         return f"Error: Command '{cmd_parts[0]}' is blocked for safety"
 
     try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
-            timeout=timeout, cwd=working_directory,
-            encoding='utf-8', errors='replace',
-            env=ensure_path_env(),
-        )
+        result = await async_run(command, timeout=timeout, shell=True)
         output = []
-        if result.stdout.strip():
-            output.append(result.stdout.strip())
-        if result.stderr.strip():
-            output.append(f"[stderr] {result.stderr.strip()}")
-        output.append(f"[exit code: {result.returncode}]")
+        if result.get('stdout', '').strip():
+            output.append(result.get('stdout', '').strip())
+        if result.get('stderr', '').strip():
+            output.append(f"[stderr] {result.get('stderr', '').strip()}")
+        output.append(f"[exit code: {result.get('returncode', '?')}]")
         return "\n".join(output)
-    except subprocess.TimeoutExpired:
-        return f"Error: Command timed out after {timeout}s"
     except Exception as e:
-        return f"Error: {e}"
+        return f"❌ 命令执行失败 (timeout={timeout}s): {e}"

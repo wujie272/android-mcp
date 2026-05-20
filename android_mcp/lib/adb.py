@@ -1,15 +1,22 @@
-"""ADB setup & connection management tools."""
+"""ADB connection management — library layer used by tools/adb.py."""
 
 from android_mcp.lib.utils import run, adb_connected, adb_shell, ensure_path_env
 
 
 async def check_setup_status() -> str:
     """Check if ADB is installed and connected."""
+    # First check if Shizuku is available (preferred)
+    from android_mcp.lib.utils import shizuku_available
+    if shizuku_available():
+        return ("✅ Shizuku is available via rish! "
+                "Most tools will work without ADB.\n"
+                "ADB is still available as a fallback if needed.")
+
     r = run(['which', 'adb'], timeout=5)
     if not r['success']:
         return ("ADB not installed.\n"
                 "Run: pkg install android-tools\n"
-                "Then use adb_connect tool to connect.")
+                "Or use Shizuku (already set up at ~/rish) for privilege elevation.")
 
     connected = adb_connected()
     if connected:
@@ -17,7 +24,9 @@ async def check_setup_status() -> str:
         return f"ADB is connected!\n{devices.get('stdout', '')}"
 
     return ("ADB is installed but not connected.\n\n"
-            "To connect:\n"
+            "💡 Shizuku 已配置（~/rish），它会自动优先使用。\n"
+            "   ADB 只在 Shizuku 不可用时作为后备。\n\n"
+            "如需连接 ADB：\n"
             "1. Settings → Developer Options → Wireless Debugging → ON\n"
             "2. Tap 'Pair device with pairing code'\n"
             "3. Note the pairing code and port\n"

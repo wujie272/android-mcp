@@ -1,11 +1,17 @@
-"""UI Automation: screenshot, tap, swipe, input, keyevent, dump_ui, navigation."""
+"""UI Automation: screenshot, tap, swipe, input, keyevent, dump_ui, navigation.
+
+优化日志 v2.0:
+  - 所有工具添加 try/except 异常保护（防止崩溃退出）
+  - take_screenshot / dump_ui / find_and_tap 异常时返回友好错误
+"""
 
 import base64
 import re
+import shutil
 from pathlib import Path
 
 from android_mcp.app import mcp
-from android_mcp.lib.utils import run, adb_connected, adb_shell, HOME
+from android_mcp.lib.utils import run as sync_run, privileged_shell, privileged_available, HOME
 
 
 # ──────────────────────────────────────────────
@@ -19,32 +25,38 @@ async def take_screenshot(output_path: str = "/data/data/com.termux/files/home/s
     Args:
         output_path: Where to save the screenshot file
     """
-    tmp_path = '/sdcard/mcp_screenshot.png'
-    if adb_connected():
-        r = adb_shell(f'screencap -p {tmp_path}', timeout=10)
-        if r['success']:
-            import shutil
-            sdcard_real = '/storage/emulated/0/mcp_screenshot.png'
-            try:
-                shutil.copy2(sdcard_real, output_path)
-            except Exception:
-                run(f'adb pull {tmp_path} {output_path}', shell=True, timeout=10)
-    else:
-        r = run(f'screencap -p {output_path}', shell=True, timeout=10)
-
-    if not r.get('success'):
-        return f"Error taking screenshot: {r.get('error', r.get('stderr', 'Unknown'))}"
-
-    path = Path(output_path)
-    if not path.exists() or path.stat().st_size == 0:
-        return "Error: Screenshot file was not created or is empty"
-
     try:
-        with open(path, 'rb') as f:
-            data = base64.b64encode(f.read()).decode('ascii')
-        return f"Screenshot saved to {output_path} ({path.stat().st_size:,} bytes)\n\ndata:image/png;base64,{data}"
+        tmp_path = '/sdcard/mcp_screenshot.png'
+        sdcard_real = '/storage/emulated/0/mcp_screenshot.png'
+
+        if privileged_available():
+            r = privileged_shell(f'screencap -p {tmp_path}', timeout=10)
+            if r['success']:
+                try:
+                    shutil.copy2(sdcard_real, output_path)
+                except Exception:
+                    # ADB fallback for pull
+                    from android_mcp.lib.utils import adb_connected, adb_shell
+                    if adb_connected():
+                        sync_run(f'adb pull {tmp_path} {output_path}', shell=True, timeout=10)
+        else:
+            r = sync_run(f'screencap -p {output_path}', shell=True, timeout=10)
+
+        if not r.get('success'):
+            return f"Error taking screenshot: {r.get('error', r.get('stderr', 'Unknown'))}"
+
+        path = Path(output_path)
+        if not path.exists() or path.stat().st_size == 0:
+            return "Error: Screenshot file was not created or is empty"
+
+        try:
+            with open(path, 'rb') as f:
+                data = base64.b64encode(f.read()).decode('ascii')
+            return f"Screenshot saved to {output_path} ({path.stat().st_size:,} bytes)\n\ndata:image/png;base64,{data}"
+        except Exception as e:
+            return f"Screenshot saved to {output_path} but failed to encode: {e}"
     except Exception as e:
-        return f"Screenshot saved to {output_path} but failed to encode: {e}"
+        return f"❌ 截图失败: {e}"
 
 
 # ──────────────────────────────────────────────
@@ -57,35 +69,36 @@ async def get_screen_size() -> str:
 
     Returns known dimensions from device properties if ADB is not connected.
     """
-    # Try via ADB first
-    if adb_connected():
-        r = run('wm size', shell=True, timeout=5)
+    # Try via privileged shell (rish/adb) first
+    if privileged_available():
+        r = sync_run('wm size', shell=True, timeout=5)
         out = r.get('stdout', '').strip()
         if out:
             return out
 
     # Fallback: try dumpsys
-    if adb_connected():
-        r = run("dumpsys display | grep -E 'mDisplayWidth|mDisplayHeight|displayWidth|displayHeight' | head -5",
+    if privileged_available():
+        r = sync_run("dumpsys display | grep -E 'mDisplayWidth|mDisplayHeight|displayWidth|displayHeight' | head -5",
                 shell=True, timeout=5)
         out = r.get('stdout', '').strip()
         if out:
             return out
 
     # Fallback: device properties
-    r_w = run('getprop ro.sf.lcd_width', shell=True, timeout=3)
-    r_h = run('getprop ro.sf.lcd_height', shell=True, timeout=3)
+    r_w = sync_run('getprop ro.sf.lcd_width', shell=True, timeout=3)
+    r_h = sync_run('getprop ro.sf.lcd_height', shell=True, timeout=3)
     w = r_w.get('stdout', '').strip()
     h = r_h.get('stdout', '').strip()
     if w and h:
         return f"Physical size: {w}x{h} (from device properties)"
 
-    r_dpi = run('getprop ro.sf.lcd_density', shell=True, timeout=3)
+    r_dpi = sync_run('getprop ro.sf.lcd_density', shell=True, timeout=3)
     dpi = r_dpi.get('stdout', '').strip()
 
     return (f"Screen size unavailable.\n"
-            f"需要 ADB 无线调试才能获取精确分辨率。\n"
+            f"需要 Shizuku 或 ADB 无线调试才能获取精确分辨率。\n"
             f"{f'DPI: {dpi}' if dpi else ''}"
+            f"\n💡 推荐用 Shizuku（已在运行），或："
             f"\n设置 → 开发者选项 → 无线调试 → 开启"
             f"\n然后用 adb_connect 工具连接。")
 
@@ -104,10 +117,13 @@ async def tap_screen(x: int, y: int) -> str:
         x: X coordinate (pixels from left)
         y: Y coordinate (pixels from top)
     """
-    r = run(f'input tap {x} {y}', shell=True, timeout=5)
-    if r['success']:
-        return f"Tapped at ({x}, {y})"
-    return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    try:
+        r = sync_run(f'input tap {x} {y}', shell=True, timeout=5)
+        if r['success']:
+            return f"Tapped at ({x}, {y})"
+        return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    except Exception as e:
+        return f"❌ 点击失败: {e}"
 
 
 @mcp.tool()
@@ -119,7 +135,7 @@ async def long_press(x: int, y: int, duration_ms: int = 1000) -> str:
         y: Y coordinate
         duration_ms: Press duration in milliseconds (default: 1000)
     """
-    r = run(f'input swipe {x} {y} {x} {y} {duration_ms}', shell=True, timeout=10)
+    r = sync_run(f'input swipe {x} {y} {x} {y} {duration_ms}', shell=True, timeout=10)
     if r['success']:
         return f"Long pressed at ({x}, {y}) for {duration_ms}ms"
     return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
@@ -136,10 +152,13 @@ async def swipe_screen(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 30
         y2: End Y coordinate
         duration_ms: Swipe duration in milliseconds (default: 300)
     """
-    r = run(f'input swipe {x1} {y1} {x2} {y2} {duration_ms}', shell=True, timeout=10)
-    if r['success']:
-        return f"Swiped from ({x1},{y1}) to ({x2},{y2}) in {duration_ms}ms"
-    return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    try:
+        r = sync_run(f'input swipe {x1} {y1} {x2} {y2} {duration_ms}', shell=True, timeout=10)
+        if r['success']:
+            return f"Swiped from ({x1},{y1}) to ({x2},{y2}) in {duration_ms}ms"
+        return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    except Exception as e:
+        return f"❌ 滑动失败: {e}"
 
 
 # ──────────────────────────────────────────────
@@ -156,11 +175,14 @@ async def input_text(text: str) -> str:
     Args:
         text: Text to type (spaces are supported)
     """
-    escaped = text.replace(' ', '%s')
-    r = run(f'input text "{escaped}"', shell=True, timeout=10)
-    if r['success']:
-        return f"Typed: {text}"
-    return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    try:
+        escaped = text.replace(' ', '%s')
+        r = sync_run(f'input text "{escaped}"', shell=True, timeout=10)
+        if r['success']:
+            return f"Typed: {text}"
+        return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    except Exception as e:
+        return f"❌ 输入失败: {e}"
 
 
 @mcp.tool()
@@ -170,15 +192,17 @@ async def input_chinese_text(text: str) -> str:
     Args:
         text: The text to input (any language)
     """
-    from android_mcp.lib.utils import run as _run
-    # Use in-memory clipboard fallback (via set_clipboard which has fallback)
-    from android_mcp.tools.communication import set_clipboard as _set_clip
-    await _set_clip(text)
-    # Now paste
-    r = _run('input keyevent 279', shell=True, timeout=5)
-    if r['success']:
-        return f"Pasted text: {text}"
-    return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    try:
+        from android_mcp.lib.utils import run as _run
+        from android_mcp.tools.communication import set_clipboard as _set_clip
+        await _set_clip(text)
+        # Now paste
+        r = _run('input keyevent 279', shell=True, timeout=5)
+        if r['success']:
+            return f"Pasted text: {text}"
+        return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    except Exception as e:
+        return f"❌ 粘贴失败: {e}"
 
 
 @mcp.tool()
@@ -197,10 +221,13 @@ async def input_keyevent(keycode: str) -> str:
             - '279' / 'KEYCODE_PASTE' = Paste
             - '84' / 'KEYCODE_SEARCH' = Search
     """
-    r = run(f'input keyevent {keycode}', shell=True, timeout=5)
-    if r['success']:
-        return f"Sent keyevent: {keycode}"
-    return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    try:
+        r = sync_run(f'input keyevent {keycode}', shell=True, timeout=5)
+        if r['success']:
+            return f"Sent keyevent: {keycode}"
+        return f"Error: {r.get('error', r.get('stderr', 'Failed'))}"
+    except Exception as e:
+        return f"❌ 按键失败: {e}"
 
 
 # ──────────────────────────────────────────────
@@ -243,16 +270,18 @@ def _dump_ui_xml(output_path: str) -> str | None:
     tmp_dump = '/sdcard/mcp_ui_dump.xml'
     sdcard_real = '/storage/emulated/0/mcp_ui_dump.xml'
 
-    if adb_connected():
-        r = adb_shell(f'uiautomator dump {tmp_dump}', timeout=15)
+    if privileged_available():
+        r = privileged_shell(f'uiautomator dump {tmp_dump}', timeout=15)
         if r['success']:
             import shutil
             try:
                 shutil.copy2(sdcard_real, output_path)
             except Exception:
-                run(f'adb pull {tmp_dump} {output_path}', shell=True, timeout=10)
+                from android_mcp.lib.utils import adb_connected
+                if adb_connected():
+                    sync_run(f'adb pull {tmp_dump} {output_path}', shell=True, timeout=10)
     else:
-        r = run(f'uiautomator dump {output_path}', shell=True, timeout=15)
+        r = sync_run(f'uiautomator dump {output_path}', shell=True, timeout=15)
 
     if not r.get('success'):
         return None
@@ -342,46 +371,51 @@ async def find_and_tap(text: str) -> str:
     Args:
         text: Text to search for in UI elements (partial match, case-insensitive)
     """
-    dump_path = f"{HOME}/ui_dump_tap.xml"
-    tmp_dump = '/sdcard/mcp_ui_dump_tap.xml'
-    sdcard_real = '/storage/emulated/0/mcp_ui_dump_tap.xml'
-
-    if adb_connected():
-        r = adb_shell(f'uiautomator dump {tmp_dump}', timeout=15)
-        if r.get('success'):
-            import shutil
-            try:
-                shutil.copy2(sdcard_real, dump_path)
-            except Exception:
-                run(f'adb pull {tmp_dump} {dump_path}', shell=True, timeout=10)
-    else:
-        r = run(f'uiautomator dump {dump_path}', shell=True, timeout=15)
-
-    if not r.get('success'):
-        return f"Error dumping UI: {r.get('error', r.get('stderr', 'Unknown'))}"
-
-    path = Path(dump_path)
-    if not path.exists():
-        return "Error: UI dump file was not created"
-
     try:
-        content = path.read_text(encoding='utf-8')
+        dump_path = f"{HOME}/ui_dump_tap.xml"
+        tmp_dump = '/sdcard/mcp_ui_dump_tap.xml'
+        sdcard_real = '/storage/emulated/0/mcp_ui_dump_tap.xml'
+
+        if privileged_available():
+            r = privileged_shell(f'uiautomator dump {tmp_dump}', timeout=15)
+            if r.get('success'):
+                import shutil
+                try:
+                    shutil.copy2(sdcard_real, dump_path)
+                except Exception:
+                    from android_mcp.lib.utils import adb_connected
+                    if adb_connected():
+                        sync_run(f'adb pull {tmp_dump} {dump_path}', shell=True, timeout=10)
+        else:
+            r = sync_run(f'uiautomator dump {dump_path}', shell=True, timeout=15)
+
+        if not r.get('success'):
+            return f"Error dumping UI: {r.get('error', r.get('stderr', 'Unknown'))}"
+
+        path = Path(dump_path)
+        if not path.exists():
+            return "Error: UI dump file was not created"
+
+        try:
+            content = path.read_text(encoding='utf-8')
+        except Exception as e:
+            return f"Error reading dump: {e}"
+
+        pattern = r'text="([^"]*)".*?content-desc="([^"]*)".*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+        matches = re.findall(pattern, content)
+
+        text_lower = text.lower()
+        for node_text, desc, x1, y1, x2, y2 in matches:
+            if text_lower in node_text.lower() or text_lower in desc.lower():
+                cx = (int(x1) + int(x2)) // 2
+                cy = (int(y1) + int(y2)) // 2
+                r = sync_run(f'input tap {cx} {cy}', shell=True, timeout=5)
+                found_label = node_text or desc
+                return f"Found \"{found_label}\" → tapped at ({cx}, {cy})"
+
+        return f"No UI element found matching \"{text}\". Use dump_ui() to see what's on screen."
     except Exception as e:
-        return f"Error reading dump: {e}"
-
-    pattern = r'text="([^"]*)".*?content-desc="([^"]*)".*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
-    matches = re.findall(pattern, content)
-
-    text_lower = text.lower()
-    for node_text, desc, x1, y1, x2, y2 in matches:
-        if text_lower in node_text.lower() or text_lower in desc.lower():
-            cx = (int(x1) + int(x2)) // 2
-            cy = (int(y1) + int(y2)) // 2
-            r = run(f'input tap {cx} {cy}', shell=True, timeout=5)
-            found_label = node_text or desc
-            return f"Found \"{found_label}\" → tapped at ({cx}, {cy})"
-
-    return f"No UI element found matching \"{text}\". Use dump_ui() to see what's on screen."
+        return f"❌ 查找点击失败: {e}"
 
 
 # ──────────────────────────────────────────────
@@ -391,19 +425,28 @@ async def find_and_tap(text: str) -> str:
 @mcp.tool()
 async def go_home() -> str:
     """Press the Home button to go to the home screen."""
-    r = run('input keyevent 3', shell=True, timeout=5)
-    return "Home button pressed" if r['success'] else f"Error: {r.get('stderr', 'Failed')}"
+    try:
+        r = sync_run('input keyevent 3', shell=True, timeout=5)
+        return "Home button pressed" if r['success'] else f"Error: {r.get('stderr', 'Failed')}"
+    except Exception as e:
+        return f"❌ 返回桌面失败: {e}"
 
 
 @mcp.tool()
 async def go_back() -> str:
     """Press the Back button."""
-    r = run('input keyevent 4', shell=True, timeout=5)
-    return "Back button pressed" if r['success'] else f"Error: {r.get('stderr', 'Failed')}"
+    try:
+        r = sync_run('input keyevent 4', shell=True, timeout=5)
+        return "Back button pressed" if r['success'] else f"Error: {r.get('stderr', 'Failed')}"
+    except Exception as e:
+        return f"❌ 返回失败: {e}"
 
 
 @mcp.tool()
 async def open_recent_apps() -> str:
     """Open the recent apps / app switcher."""
-    r = run('input keyevent 187', shell=True, timeout=5)
-    return "Recent apps opened" if r['success'] else f"Error: {r.get('stderr', 'Failed')}"
+    try:
+        r = sync_run('input keyevent 187', shell=True, timeout=5)
+        return "Recent apps opened" if r['success'] else f"Error: {r.get('stderr', 'Failed')}"
+    except Exception as e:
+        return f"❌ 打开最近应用失败: {e}"

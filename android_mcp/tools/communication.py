@@ -1,5 +1,6 @@
 """Communication: SMS, contacts, clipboard, notifications."""
 
+import time as _time
 from android_mcp.app import mcp
 from android_mcp.lib.utils import termux, format_json, run, adb_connected
 
@@ -45,6 +46,9 @@ async def list_contacts() -> str:
 # ──────────────────────────────────────────────
 
 _clipboard_fallback: str = ""
+_clipboard_history: list[dict] = []
+_MAX_CLIP_HISTORY = 50
+
 
 @mcp.tool()
 async def get_clipboard() -> str:
@@ -75,8 +79,18 @@ async def set_clipboard(text: str) -> str:
     Args:
         text: Text to copy to clipboard
     """
-    global _clipboard_fallback
+    global _clipboard_fallback, _clipboard_history
     _clipboard_fallback = text
+
+    # Record in history (skip duplicates)
+    if not _clipboard_history or _clipboard_history[0]['text'] != text[:200]:
+        _clipboard_history.insert(0, {
+            'text': text[:200],
+            'time': _time.strftime('%H:%M:%S'),
+            'chars': len(text),
+        })
+        if len(_clipboard_history) > _MAX_CLIP_HISTORY:
+            _clipboard_history.pop()
 
     result = termux('termux-clipboard-set', [text])
     if result and 'Error' not in result:
@@ -107,7 +121,7 @@ async def send_notification(title: str, content: str, id: str = "mcp", vibrate: 
     """
     args = ['--title', title, '-c', content, '--id', id]
     if vibrate:
-        args.append('--vibrate')
+        args.extend(['--vibrate', '1'])
     result = termux('termux-notification', args)
     if result and 'Error' not in result:
         return f"Notification sent: {title}"
@@ -183,3 +197,38 @@ async def show_toast(text: str, short: bool = True) -> str:
     if adb_connected():
         run(f'am broadcast -a clipper.toast --es text "{text}"', shell=True, timeout=5)
     return f"Toast shown: {text[:50]}"
+
+
+# ──────────────────────────────────────────────
+# Clipboard History
+# ──────────────────────────────────────────────
+
+@mcp.tool()
+async def clipboard_history(limit: int = 10) -> str:
+    """Show recent clipboard history entries.
+
+    Tracks text set via set_clipboard() during this session.
+    History is in-memory and lost when the server restarts.
+
+    Args:
+        limit: Number of recent entries to show (default: 10)
+    """
+    if not _clipboard_history:
+        return "No clipboard history yet. Use set_clipboard() to store text."
+
+    limit = min(limit, len(_clipboard_history))
+    lines = [f"📋 Clipboard History (last {limit} of {len(_clipboard_history)}):\n"]
+    for i, entry in enumerate(_clipboard_history[:limit]):
+        text = entry['text'][:80]
+        suffix = "…" if len(entry['text']) > 80 else ""
+        lines.append(f"  {i+1}. [{entry['time']}] {text}{suffix} ({entry['chars']} chars)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def clipboard_history_clear() -> str:
+    """Clear the clipboard history."""
+    global _clipboard_history
+    count = len(_clipboard_history)
+    _clipboard_history.clear()
+    return f"Cleared {count} clipboard history entries."

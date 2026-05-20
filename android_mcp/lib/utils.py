@@ -1,21 +1,135 @@
-"""Shared utilities: command execution, Termux API wrappers, formatting."""
+"""Shared utilities: command execution, Termux API wrappers, formatting, logging."""
 
 import os
+import asyncio
 import subprocess
 import json
+import logging
 from pathlib import Path
+from datetime import datetime
+
+# ── Logging ──
+LOG_DIR = Path('/data/data/com.termux/files/home/mcp-servers/logs')
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+logger = logging.getLogger('android-mcp')
+logger.setLevel(logging.DEBUG)
+
+_fh = logging.FileHandler(str(LOG_DIR / 'android_mcp.log'), encoding='utf-8')
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter(
+    '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%H:%M:%S',
+))
+logger.addHandler(_fh)
+
+# Also log to stderr at INFO level
+_sh = logging.StreamHandler()
+_sh.setLevel(logging.INFO)
+_sh.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+logger.addHandler(_sh)
+
+
+# ── Unified return helpers ──
+
+def ok(msg: str, data: str = "") -> str:
+    """Return a success message (optionally with extra data)."""
+    if data:
+        return f"✅ {msg}\n{data}"
+    return f"✅ {msg}"
+
+
+def warn(msg: str) -> str:
+    """Return a warning message."""
+    return f"⚠️ {msg}"
+
+
+def err(msg: str, detail: str = "") -> str:
+    """Return an error message (optionally with detail)."""
+    if detail:
+        return f"❌ {msg}\n{detail}"
+    return f"❌ {msg}"
 
 BLOCKED_COMMANDS = {
+    # File operations (dangerous)
     'rm', 'rmdir', 'mkfs', 'dd', 'format',
+    'chmod', 'chown', 'chattr', 'mount',
+    # System operations
     'shutdown', 'reboot', 'halt', 'poweroff',
+    'init', 'killall', 'pkill',
+    # Privilege escalation
+    'sudo', 'su', 'doas',
+    # Boot/partition
+    'fdisk', 'parted', 'mkswap',
 }
 
 HOME = '/data/data/com.termux/files/home'
+RISH = f"{HOME}/rish"
 
 _ADB_REQUIRED_CMDS = {
     'screencap', 'uiautomator', 'input', 'am', 'pm', 'wm',
     'settings', 'getprop', 'dumpsys', 'monkey', 'cmd', 'content',
 }
+
+
+# ── Shizuku / rish support ──
+
+_shizuku_cache = None
+
+def shizuku_available() -> bool:
+    """Check if Shizuku is available and rish can connect."""
+    global _shizuku_cache
+    if _shizuku_cache is not None:
+        return _shizuku_cache
+    try:
+        r = subprocess.run(
+            [RISH, '-c', 'echo ok'],
+            capture_output=True, text=True, timeout=10,
+            env=ensure_path_env(),
+        )
+        # rish writes output to stderr (app_process Java bridge behavior)
+        out = (r.stdout + " " + r.stderr).strip()
+        _shizuku_cache = (r.returncode == 0 and 'ok' in out)
+        if _shizuku_cache:
+            logger.info("Shizuku available via rish")
+        return _shizuku_cache
+    except Exception:
+        _shizuku_cache = False
+        return False
+
+
+def invalidate_shizuku_cache():
+    """Clear the shizuku cache (e.g. after a connection failure)."""
+    global _shizuku_cache
+    _shizuku_cache = None
+
+
+def rish_shell(cmd: str, timeout: int = 30) -> dict:
+    """Run a command via 'rish -c' (Shizuku's privileged shell)."""
+    try:
+        result = subprocess.run(
+            [RISH, '-c', cmd],
+            capture_output=True, text=True,
+            timeout=timeout, encoding='utf-8', errors='replace',
+            env=ensure_path_env(),
+        )
+        # rish writes output to stderr (app_process Java bridge behavior)
+        combined = (result.stdout + "\n" + result.stderr).strip()
+        return {
+            'success': result.returncode == 0,
+            'returncode': result.returncode,
+            'stdout': combined,
+            'stderr': result.stderr.strip(),
+        }
+    except subprocess.TimeoutExpired:
+        invalidate_shizuku_cache()
+        return {'success': False, 'error': f'rish timed out after {timeout}s'}
+    except FileNotFoundError:
+        _shizuku_cache = False
+        return {'success': False, 'error': f'rish not found at {RISH}'}
+    except Exception as e:
+        invalidate_shizuku_cache()
+        return {'success': False, 'error': str(e)}
 
 
 def ensure_path_env() -> dict:
@@ -75,19 +189,32 @@ def adb_shell(cmd: str, timeout: int = 30) -> dict:
         return {'success': False, 'error': str(e)}
 
 
+
+
 def run(cmd: list[str] | str, timeout: int = 30, shell: bool = False) -> dict:
-    """Run a command. Auto-routes through adb shell if needed on Android 12+."""
+    """Run a command. Auto-routes through rish (Shizuku) or adb shell if needed."""
     env = ensure_path_env()
 
     first_word = ''
+    raw_cmd = ''
     if shell and isinstance(cmd, str):
-        first_word = cmd.strip().split()[0] if cmd.strip() else ''
+        raw_cmd = cmd.strip()
+        first_word = raw_cmd.split()[0] if raw_cmd else ''
     elif isinstance(cmd, list) and cmd:
+        raw_cmd = ' '.join(cmd)
         first_word = os.path.basename(cmd[0])
 
+    logger.debug(f"cmd: {raw_cmd[:120]}")
+
+    # 1) Shizuku available → use rish (preferred)
+    if first_word in _ADB_REQUIRED_CMDS and shizuku_available():
+        logger.debug(f"rish: {raw_cmd}")
+        return rish_shell(raw_cmd, timeout=timeout)
+
+    # 2) ADB connected → use adb shell (fallback)
     if first_word in _ADB_REQUIRED_CMDS and adb_connected():
         if shell and isinstance(cmd, str):
-            return adb_shell(cmd, timeout=timeout)
+            return adb_shell(raw_cmd, timeout=timeout)
         elif isinstance(cmd, list):
             return adb_shell(' '.join(cmd), timeout=timeout)
 
@@ -112,6 +239,15 @@ def run(cmd: list[str] | str, timeout: int = 30, shell: bool = False) -> dict:
         return {'success': False, 'error': str(e)}
 
 
+async def async_run(cmd: list[str] | str, timeout: int = 30, shell: bool = False) -> dict:
+    """异步运行命令 — 使用线程池避免阻塞事件循环。
+    
+    与 run() 功能相同，但包装在 asyncio.to_thread 中，
+    不会阻塞 Kelivo 其他并行工具调用。
+    """
+    return await asyncio.to_thread(run, cmd, timeout, shell)
+
+
 def termux(cmd: str, args: list[str] | None = None, timeout: int = 30) -> str:
     """Run a termux-api command and return output or error message."""
     full_cmd = [cmd] + (args or [])
@@ -119,6 +255,32 @@ def termux(cmd: str, args: list[str] | None = None, timeout: int = 30) -> str:
     if not r.get('success'):
         return f"Error: {r.get('error', r.get('stderr', 'Unknown error'))}"
     return r.get('stdout', '')
+
+
+async def async_termux(cmd: str, args: list[str] | None = None, timeout: int = 30) -> str:
+    """异步运行 termux-api 命令 — 不阻塞事件循环。"""
+    full_cmd = [cmd] + (args or [])
+    r = await async_run(full_cmd, timeout=timeout)
+    if not r.get('success'):
+        return f"Error: {r.get('error', r.get('stderr', 'Unknown error'))}"
+    return r.get('stdout', '')
+
+
+def privileged_shell(cmd: str, timeout: int = 30) -> dict:
+    """Run a command via rish (Shizuku) if available, otherwise via ADB shell.
+
+    统一的特权 shell 执行入口 — 优先 rish，回退到 ADB。
+    """
+    if shizuku_available():
+        return rish_shell(cmd, timeout=timeout)
+    if adb_connected():
+        return adb_shell(cmd, timeout=timeout)
+    return {'success': False, 'error': 'Neither Shizuku nor ADB is available'}
+
+
+def privileged_available() -> bool:
+    """Check if any privilege elevation (Shizuku or ADB) is available."""
+    return shizuku_available() or adb_connected()
 
 
 def format_json(raw: str) -> str:

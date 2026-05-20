@@ -1,7 +1,7 @@
 """System Control: volume, torch, vibrate, TTS, brightness, fingerprint."""
 
 from android_mcp.app import mcp
-from android_mcp.lib.utils import termux, format_json, run, adb_connected
+from android_mcp.lib.utils import termux, format_json, run, privileged_available, privileged_shell
 
 
 @mcp.tool()
@@ -70,8 +70,8 @@ async def get_screen_brightness() -> str:
 
     Requires ADB wireless debugging enabled on Android 12+.
     """
-    # Try via ADB if connected (settings command needs system permissions)
-    if adb_connected():
+    # Try via privileged shell (rish / ADB)
+    if privileged_available():
         r = run('settings get system screen_brightness', shell=True, timeout=5)
         val = r.get('stdout', '').strip()
         if val:
@@ -88,9 +88,8 @@ async def get_screen_brightness() -> str:
         return f"Screen brightness: {val} (from getprop)"
 
     return ("Screen brightness: unknown.\n"
-            "Wireless Debugging 未启用。需要 ADB 连接才能查询亮度。\n"
-            "设置 → 开发者选项 → 无线调试 → 开启\n"
-            "然后用 adb_connect 工具连接。")
+            "需要 Shizuku 或 ADB 无线调试才能查询亮度。\n"
+            "💡 确保 Shizuku 已启动（推荐），或开启无线调试后用 adb_connect 连接。")
 
 
 @mcp.tool()
@@ -103,11 +102,10 @@ async def set_screen_brightness(level: int) -> str:
         level: Brightness level 0-255
     """
     level = max(0, min(255, level))
-    if adb_connected():
+    if privileged_available():
         r = run(f'settings put system screen_brightness {level}', shell=True, timeout=5)
         if r['success']:
             return f"Brightness set to {level}/255"
-        return f"Error: {r.get('stderr', 'ADB command failed')}"
-    return ("无法设置亮度：需要 ADB 无线调试。\n"
-            "设置 → 开发者选项 → 无线调试 → 开启\n"
-            "然后用 adb_connect 工具连接。")
+        return f"Error: {r.get('stderr', 'ADB/rish command failed')}"
+    return ("无法设置亮度：需要 Shizuku 或 ADB 无线调试。\n"
+            "💡 确保 Shizuku 已启动（推荐），或开启无线调试后用 adb_connect 连接。")
