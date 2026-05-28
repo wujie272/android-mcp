@@ -285,3 +285,40 @@ async def github_list_branches(owner: str, repo: str, max_results: int = 20) -> 
 
 # ── 启动时加载 Token ──
 _load_gh_token()
+
+
+# ============================================================
+#  Token 刷新
+# ============================================================
+
+@mcp.tool(
+    name="github_refresh_token",
+    description="手动刷新 GitHub Token（重读 gh CLI 配置和环境变量），无需重启服务",
+)
+async def github_refresh_token() -> str:
+    """重新加载 GitHub Token（从 gh CLI 配置或环境变量）。
+
+    如果之前配置了 GitHub Token 但服务启动时未读到，
+    调用此工具可重新加载，无需重启服务。
+    """
+    global GH_TOKEN, GH_USER
+    old_token = GH_TOKEN
+    GH_TOKEN = None
+    _load_gh_token()
+
+    parts = []
+    if GH_TOKEN:
+        masked = GH_TOKEN[:4] + "…" + GH_TOKEN[-4:] if len(GH_TOKEN) > 8 else "***"
+        parts.append(f"✅ Token 已加载: {masked}")
+    else:
+        parts.append("⚠️  未找到 Token。配置方式：")
+        parts.append("   1. `gh auth login`（推荐，自动保存到 ~/.config/gh/hosts.yml）")
+        parts.append("   2. 设置环境变量 `export GITHUB_TOKEN=ghp_xxx`")
+
+    parts.append(f"👤 当前用户: {GH_USER}")
+    if old_token != GH_TOKEN:
+        parts.append("🔄 Token 已更新（与之前不同）")
+    else:
+        parts.append("ℹ️  Token 未变化")
+
+    return "\n".join(parts)

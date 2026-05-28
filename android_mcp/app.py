@@ -16,6 +16,7 @@ mcp = FastMCP("termux-control")
 # ──────────────────────────────────────────────
 import android_mcp.tools.device_info       # noqa: F401 电池/WiFi/定位
 import android_mcp.tools.ui_automation     # noqa: F401 截屏/点击/输入
+import android_mcp.tools.github            # noqa: F401 GitHub API（需立即加载，否则 RikkaHub 工具列表不可见）
 
 # ──────────────────────────────────────────────
 # ⏳ 第2层：常用工具（延迟3秒，避开启动内存峰值）
@@ -36,6 +37,5 @@ def _load_layer3():
     """加载第3层工具模块"""
     import android_mcp.tools.media             # noqa: F401
     import android_mcp.tools.adb               # noqa: F401
-    import android_mcp.tools.github            # noqa: F401
 
 threading.Timer(10.0, _load_layer3).start()

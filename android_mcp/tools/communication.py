@@ -10,23 +10,30 @@ from android_mcp.lib.utils import termux, format_json, run, adb_connected
 # ──────────────────────────────────────────────
 
 @mcp.tool()
-async def list_sms(limit: int = 10, type: str = "inbox") -> str:
-    """List SMS messages.
+async def list_sms(limit: int = 10, msg_type: str = "inbox") -> str:
+    """List SMS messages on the phone.
+
+    获取短信列表。默认返回收件箱最新 10 条。
+    每条包含: sender(发件人), body(内容), received_time(时间).
 
     Args:
-        limit: Number of messages to retrieve (default: 10)
-        type: Message type - 'inbox', 'sent', 'draft', 'all' (default: inbox)
+        limit: Number of messages to retrieve (default: 10, max: 100)
+        msg_type: Message type - 'inbox' (收件箱), 'sent' (已发送),
+                  'draft' (草稿), 'all' (全部) (default: inbox)
     """
-    return format_json(termux('termux-sms-list', ['-l', str(limit), '-t', type]))
+    return format_json(termux('termux-sms-list', ['-l', str(limit), '-t', msg_type]))
 
 
 @mcp.tool()
 async def send_sms(number: str, message: str) -> str:
-    """Send an SMS message.
+    """Send an SMS message to a phone number.
+
+    发送短信。需要已授予 Termux 短信权限。
+    注意：发送短信会产生费用。
 
     Args:
-        number: Phone number to send to
-        message: Message text
+        number: Phone number to send to (e.g. '13800138000')
+        message: Message text content
     """
     return termux('termux-sms-send', ['-n', number, message])
 
@@ -37,7 +44,11 @@ async def send_sms(number: str, message: str) -> str:
 
 @mcp.tool()
 async def list_contacts() -> str:
-    """List all contacts from the phone."""
+    """List all contacts from the phone book.
+
+    返回联系人列表: name(姓名), phone(电话号码),
+    email(邮箱, 如果有). 需要已授予联系人权限。
+    """
     return format_json(termux('termux-contact-list', timeout=30))
 
 

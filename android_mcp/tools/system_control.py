@@ -8,16 +8,26 @@ from android_mcp.lib.utils import termux, format_json, run, privileged_available
 async def set_volume(stream: str, volume: int) -> str:
     """Set a volume level on the phone.
 
+    设置指定音频流的音量大小。
+
     Args:
-        stream: Volume stream - 'music', 'ring', 'alarm', 'notification', 'system', 'call'
-        volume: Volume level (0-15 typical range, depends on device)
+        stream: Volume stream - 'music'(媒体), 'ring'(铃声),
+                'alarm'(闹钟), 'notification'(通知),
+                'system'(系统), 'call'(通话)
+        volume: Volume level (0~15, 取决于设备。0=静音, 15=最大)
     """
-    return termux('termux-volume', [stream, str(volume)]) or f"Volume '{stream}' set to {volume}"
+    return termux('termux-volume', [str(stream), str(volume)]) or f"Volume '{stream}' set to {volume}"
 
 
 @mcp.tool()
 async def get_volume() -> str:
-    """Get current volume levels for all audio streams."""
+    """Get current volume levels for all audio streams.
+
+    返回所有音频流的当前音量:
+    music(媒体), ring(铃声), alarm(闹钟),
+    notification(通知), system(系统), call(通话).
+    每个流显示当前音量和最大音量。
+    """
     return format_json(termux('termux-volume'))
 
 

@@ -13,7 +13,9 @@ import os
 import time
 import signal
 
-sys.path.insert(0, '/data/data/com.termux/files/home/mcp-servers/android-mcp')
+from android_mcp.lib.constants import MCP_SERVER_DIR, PID_FILE
+
+sys.path.insert(0, str(MCP_SERVER_DIR))
 
 from android_mcp import mcp
 import uvicorn
@@ -21,7 +23,7 @@ import uvicorn
 # ── 配置 ──
 HOST = os.environ.get('HOST', '0.0.0.0')
 PORT = int(os.environ.get('PORT', '3000'))
-STATUS_FILE = '/data/data/com.termux/files/home/mcp-servers/run/android-mcp.pid'
+STATUS_FILE = str(PID_FILE)
 MAX_RESTART_DELAY = 30  # 最大等待秒数（指数退避）
 MIN_RESTART_DELAY = 1   # 初始等待秒数
 
@@ -86,7 +88,8 @@ while running:
 
         print(f"\n⚠️ 服务异常退出 (第{restart_count}次): {e}")
         print(f"   {delay}秒后自动重启...")
-        print(f"   📝 查看日志: cat ~/mcp-servers/logs/android.log")
+        from android_mcp.lib.constants import ANDROID_LOG
+        print(f"   📝 查看日志: cat {ANDROID_LOG}")
 
         # 重新写入 PID（重启后 PID 不变）
         write_status_file(os.getpid())

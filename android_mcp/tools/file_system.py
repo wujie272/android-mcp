@@ -13,6 +13,7 @@ from datetime import datetime
 
 from android_mcp.app import mcp
 from android_mcp.lib.utils import async_run, BLOCKED_COMMANDS, ensure_path_env
+from android_mcp.lib.constants import HOME, SDCARD, SDCARD_SHORT
 
 
 # ──────────────────────────────────────────────
@@ -354,9 +355,8 @@ async def list_directory_with_sizes(path: str = ".", sort_by: str = "name") -> s
 @mcp.tool()
 async def list_allowed_directories() -> str:
     """List directories that this server can access."""
-    from android_mcp.lib.utils import HOME
     accessible = []
-    for p in [HOME, '/sdcard', '/storage/emulated/0']:
+    for p in [str(HOME), str(SDCARD_SHORT), str(SDCARD)]:
         path = Path(p)
         if path.exists():
             rw = "R/W" if os.access(p, os.R_OK | os.W_OK) else \

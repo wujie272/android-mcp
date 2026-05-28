@@ -1,21 +1,32 @@
 """Shared utilities: command execution, Termux API wrappers, formatting, logging."""
 
 import os
+import time
 import asyncio
 import subprocess
 import json
 import logging
 from pathlib import Path
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
-# ── Logging ──
-LOG_DIR = Path('/data/data/com.termux/files/home/mcp-servers/logs')
+from android_mcp.lib.constants import HOME, LOG_DIR, RISH as _RISH_PATH
+
+# ── 启动时间（用于自愈健康检查）──
+STARTUP_TIME = time.time()
+
+# ── Logging（日志轮转：1MB × 3 份）──
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger('android-mcp')
 logger.setLevel(logging.DEBUG)
 
-_fh = logging.FileHandler(str(LOG_DIR / 'android_mcp.log'), encoding='utf-8')
+_fh = RotatingFileHandler(
+    str(LOG_DIR / 'android_mcp.log'),
+    maxBytes=1_000_000,   # 1MB 轮转
+    backupCount=3,         # 保留 3 份历史
+    encoding='utf-8',
+)
 _fh.setLevel(logging.DEBUG)
 _fh.setFormatter(logging.Formatter(
     '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -63,8 +74,8 @@ BLOCKED_COMMANDS = {
     'fdisk', 'parted', 'mkswap',
 }
 
-HOME = '/data/data/com.termux/files/home'
-RISH = f"{HOME}/rish"
+HOME = str(HOME)
+RISH = str(_RISH_PATH)
 
 _ADB_REQUIRED_CMDS = {
     'screencap', 'uiautomator', 'input', 'am', 'pm', 'wm',
@@ -281,6 +292,11 @@ def privileged_shell(cmd: str, timeout: int = 30) -> dict:
 def privileged_available() -> bool:
     """Check if any privilege elevation (Shizuku or ADB) is available."""
     return shizuku_available() or adb_connected()
+
+
+def get_uptime() -> float:
+    """返回服务已运行秒数（用于健康检查）。"""
+    return time.time() - STARTUP_TIME
 
 
 def format_json(raw: str) -> str:
