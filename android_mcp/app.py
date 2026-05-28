@@ -16,6 +16,7 @@ mcp = FastMCP("termux-control")
 # ──────────────────────────────────────────────
 import android_mcp.tools.device_info       # noqa: F401 电池/WiFi/定位
 import android_mcp.tools.ui_automation     # noqa: F401 截屏/点击/输入
+import android_mcp.tools.ui_smart          # noqa: F401 智能元素定位（click_by_text/find_element/wait等）
 import android_mcp.tools.github            # noqa: F401 GitHub API（需立即加载，否则 RikkaHub 工具列表不可见）
 
 # ──────────────────────────────────────────────
