@@ -306,3 +306,53 @@ def format_json(raw: str) -> str:
         return json.dumps(data, indent=2, ensure_ascii=False)
     except (json.JSONDecodeError, TypeError):
         return raw
+
+
+# ══════════════════════════════════════════════
+# Security Gates（安全门）
+# ══════════════════════════════════════════════
+# 环境变量控制:
+#   ANDROID_MCP_READONLY=true  → 只读模式，禁止所有写入操作
+#   ANDROID_MCP_ALLOW_SHELL=true  → 是否允许 shell/ADB 命令执行
+
+READONLY_MODE = os.environ.get('ANDROID_MCP_READONLY', '').lower() in ('true', '1', 'yes', 'readonly')
+ALLOW_SHELL = os.environ.get('ANDROID_MCP_ALLOW_SHELL', 'true').lower() in ('true', '1', 'yes', 'allow')
+
+
+def check_readonly() -> bool:
+    """Check if server is in read-only mode."""
+    return READONLY_MODE
+
+
+def check_write_permission(action: str = "write") -> str | None:
+    """Check write permission. Returns error message if denied, None if allowed.
+
+    用于工具函数开头：如果返回 str 则直接返回该错误信息，禁止执行。
+    """
+    if READONLY_MODE:
+        return (
+            f"❌ 写入操作已禁止：服务器处于只读模式。\n"
+            f"   请求的操作: {action}\n"
+            f"   设置 ANDROID_MCP_READONLY=false 即可启用。"
+        )
+    return None
+
+
+def check_shell_permission(action: str = "shell") -> str | None:
+    """Check shell command permission."""
+    if not ALLOW_SHELL:
+        return (
+            f"❌ Shell 命令已禁止。\n"
+            f"   请求的操作: {action}\n"
+            f"   设置 ANDROID_MCP_ALLOW_SHELL=true 即可启用。"
+        )
+    return None
+
+
+# ──────────── 安全级别定义 ────────────
+# 用于工具文档标注，帮助用户理解每个工具的安全级别
+
+DANGER_READONLY = "🔒 只读"      # 仅查询信息，无副作用
+DANGER_LOW = "🔓 低风险"         # 截图、UI dump 等视觉操作
+DANGER_MEDIUM = "⚡ 中风险"      # 点击、输入、滑动等交互操作
+DANGER_HIGH = "🚨 高风险"        # 安装/卸载、发短信、删除文件、shell 执行

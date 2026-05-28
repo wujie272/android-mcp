@@ -463,7 +463,7 @@ async def device_health_report() -> str:
         f"  进程 PID:  {pid_content}",
         f"  PID 文件:  {'✅ 存在' if pid_exists else '❌ 不存在'}",
         f"  日志大小:  {log_size:,} bytes",
-        f"  服务版本:  0.2.0",
+        f"  服务版本:  0.4.0",
         f"  Shizuku:   查看 adb_status()",
         "",
         "💡 提示:",

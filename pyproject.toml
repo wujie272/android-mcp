@@ -1,6 +1,6 @@
 [project]
 name = "android-mcp"
-version = "0.2.0"
+version = "0.4.0"
 description = "Android MCP Server — control your Android phone from AI via Model Context Protocol"
 readme = "README.md"
 requires-python = ">=3.10"
