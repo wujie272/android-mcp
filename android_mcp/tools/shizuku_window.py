@@ -1,0 +1,173 @@
+"""Shizuku 小窗管理：隐藏/显示/移动/重启 Shizuku App 窗口。
+
+Shizuku 的 shizuku_server 是独立守护进程（oom_adj=-17），
+App UI 窗口关闭后不影响 rish 调用。本模块用于管理 App 窗口。
+"""
+
+from android_mcp.app import mcp
+from android_mcp.lib.utils import privileged_shell, run
+
+SHIZUKU_PKG = "moe.shizuku.privileged.api"
+SHIZUKU_ACTIVITY = "moe.shizuku.privileged.api/moe.shizuku.manager.MainActivity"
+
+
+def _get_task_id() -> str | None:
+    """通过 dumpsys 查找 Shizuku 的 taskId。"""
+    r = privileged_shell(f"dumpsys window windows | grep -E 'moe.shizuku.*taskId' | head -1")
+    if not r.get('success'):
+        return None
+    # 提取 taskId=296
+    import re
+    m = re.search(r'taskId=(\d+)', r.get('stdout', ''))
+    return m.group(1) if m else None
+
+
+def _is_shizuku_running() -> bool:
+    """检查 Shizuku App 进程是否在运行。"""
+    r = privileged_shell(f"pgrep -f '{SHIZUKU_PKG}' | head -1")
+    return bool(r.get('stdout', '').strip())
+
+
+@mcp.tool()
+async def shizuku_hide() -> str:
+    """隐藏 Shizuku 小窗（缩到右上角极小尺寸 + force-stop App UI）。
+
+    shizuku_server 守护进程不受影响，rish 调用继续可用。
+    需要恢复时用 shizuku_show()。
+    """
+    task_id = _get_task_id()
+    if not task_id:
+        return "⚠️ 未找到 Shizuku 小窗（可能已隐藏）"
+
+    # 先缩到右上角极小尺寸（18×13px），再 force-stop
+    r = privileged_shell(
+        f"am task resize {task_id} 1040 10 1070 30 && "
+        f"sleep 0.5 && "
+        f"am force-stop {SHIZUKU_PKG}"
+    )
+    if r.get('success'):
+        return (
+            "✅ Shizuku 小窗已隐藏\n"
+            "  · App UI 已关闭\n"
+            "  · shizuku_server 守护进程继续运行 ✓\n"
+            "  · rish 调用不受影响 ✓\n"
+            "  · 需要恢复请用 shizuku_show()"
+        )
+    return f"⚠️ 隐藏失败：{r.get('stderr', r.get('error', '未知错误'))}"
+
+
+@mcp.tool()
+async def shizuku_show() -> str:
+    """显示/启动 Shizuku App 窗口。
+
+    如果 App 已关闭则重新打开，如果已在运行则移到屏幕中央。
+    """
+    if _is_shizuku_running():
+        # 已有进程，移到屏幕中央
+        task_id = _get_task_id()
+        if task_id:
+            r = privileged_shell(f"am task resize {task_id} 200 500 880 1400")
+            if r.get('success'):
+                return "✅ Shizuku 窗口已移到屏幕中央"
+        # 即使 resize 失败，也尝试 bring-to-front
+        privileged_shell(f"am start -n {SHIZUKU_ACTIVITY}")
+        return "✅ Shizuku 已切换到前台"
+    else:
+        # 启动 App
+        r = privileged_shell(f"am start -n {SHIZUKU_ACTIVITY}")
+        if r.get('success'):
+            return "✅ Shizuku App 已启动"
+        return f"⚠️ 启动失败：{r.get('stderr', r.get('error', '未知错误'))}"
+
+
+@mcp.tool()
+async def shizuku_resize(left: int = 100, top: int = 100, right: int = 500, bottom: int = 500) -> str:
+    """调整 Shizuku 小窗的位置和大小。
+
+    Args:
+        left: 左边缘 x 坐标（默认 100）
+        top: 上边缘 y 坐标（默认 100）
+        right: 右边缘 x 坐标（默认 500）
+        bottom: 下边缘 y 坐标（默认 500）
+
+    屏幕尺寸 1080×2400，坐标示例：
+        · 右上角小点:  1040, 10, 1070, 30
+        · 右下角小点:  1040, 2350, 1070, 2380
+        · 屏幕中央:    200, 500, 880, 1400
+        · 全屏:        0, 0, 1080, 2400
+    """
+    task_id = _get_task_id()
+    if not task_id:
+        return "⚠️ 未找到 Shizuku 小窗，请先用 shizuku_show() 打开"
+
+    r = privileged_shell(f"am task resize {task_id} {left} {top} {right} {bottom}")
+    if r.get('success'):
+        w = right - left
+        h = bottom - top
+        return f"✅ Shizuku 窗口已调整到 ({left},{top}) → ({right},{bottom})，尺寸 {w}×{h}px"
+    return f"⚠️ 调整失败：{r.get('stderr', r.get('error', '未知错误'))}"
+
+
+@mcp.tool()
+async def shizuku_status() -> str:
+    """查看 Shizuku 的运行状态：App 进程、shizuku_server 守护进程、rish 可用性。
+
+    返回：
+        · App UI 是否运行
+        · shizuku_server 守护进程状态
+        · rish 是否可用
+        · 小窗位置（如果可见）
+    """
+    lines = []
+    import re
+
+    # 1. App 进程
+    r = privileged_shell(f"pgrep -f '{SHIZUKU_PKG}' | head -1")
+    app_pid = r.get('stdout', '').strip()
+    if app_pid:
+        lines.append(f"✅ App UI 进程: PID {app_pid}")
+    else:
+        lines.append("⏹️  App UI 进程: 未运行")
+
+    # 2. shizuku_server 守护进程
+    r = privileged_shell("pgrep -x shizuku_server | head -1")
+    srv_pid = r.get('stdout', '').strip()
+    if srv_pid:
+        r2 = privileged_shell(f"cat /proc/{srv_pid}/oom_adj 2>/dev/null || echo '?'")
+        oom = r2.get('stdout', '').strip()
+        lines.append(f"✅ shizuku_server 守护进程: PID {srv_pid} (oom_adj={oom})")
+    else:
+        lines.append("❌ shizuku_server 守护进程: 未运行 — 请在 Shizuku App 中启动")
+
+    # 3. rish 可用性
+    r = privileged_shell("~/rish -c 'echo ok' 2>&1")
+    if r.get('success') and 'ok' in r.get('stdout', ''):
+        lines.append("✅ rish 可用")
+    else:
+        lines.append("❌ rish 不可用")
+
+    # 4. 小窗位置
+    r = privileged_shell("dumpsys window windows | grep -A1 'c50ea99 moe.shizuku' | grep frame")
+    frame_match = re.search(r'frame=\[Rect\((\d+), (\d+) - (\d+), (\d+)\)\]', r.get('stdout', ''))
+    if frame_match:
+        l, t, r2, b = frame_match.groups()
+        w = int(r2) - int(l)
+        h = int(b) - int(t)
+        lines.append(f"🪟 小窗位置: ({l},{t}) → ({r2},{b}) 尺寸 {w}×{h}px")
+    else:
+        lines.append("🪟 小窗: 不可见（已隐藏或未启动）")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def shizuku_restart() -> str:
+    """重启 Shizuku App（先 force-stop 再重新打开）。
+
+    用于 Shizuku 卡死或异常时恢复。
+    shizuku_server 守护进程不受 force-stop 影响。
+    """
+    r = privileged_shell(f"am force-stop {SHIZUKU_PKG} && sleep 1 && am start -n {SHIZUKU_ACTIVITY}")
+    if r.get('success'):
+        return "✅ Shizuku App 已重启"
+    return f"⚠️ 重启失败：{r.get('stderr', r.get('error', '未知错误'))}"

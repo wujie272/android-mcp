@@ -1,5 +1,4 @@
-"""Support `python -m android_mcp` to run as stdio server."""
-
+"""Support `python -m android_mcp`."""
 from server import main
 
 main()

@@ -1,4 +1,4 @@
-"""System Control: volume, torch, vibrate, TTS, brightness, fingerprint."""
+"""System control: volume, torch, vibrate, TTS, brightness, fingerprint."""
 
 from android_mcp.app import mcp
 from android_mcp.lib.utils import termux, format_json, run, privileged_available, privileged_shell
@@ -6,116 +6,69 @@ from android_mcp.lib.utils import termux, format_json, run, privileged_available
 
 @mcp.tool()
 async def set_volume(stream: str, volume: int) -> str:
-    """Set a volume level on the phone.
-
-    设置指定音频流的音量大小。
-
-    Args:
-        stream: Volume stream - 'music'(媒体), 'ring'(铃声),
-                'alarm'(闹钟), 'notification'(通知),
-                'system'(系统), 'call'(通话)
-        volume: Volume level (0~15, 取决于设备。0=静音, 15=最大)
-    """
+    """Set volume. stream: music/ring/alarm/notification/system/call. volume: 0-15."""
     return termux('termux-volume', [str(stream), str(volume)]) or f"Volume '{stream}' set to {volume}"
 
 
 @mcp.tool()
 async def get_volume() -> str:
-    """Get current volume levels for all audio streams.
-
-    返回所有音频流的当前音量:
-    music(媒体), ring(铃声), alarm(闹钟),
-    notification(通知), system(系统), call(通话).
-    每个流显示当前音量和最大音量。
-    """
+    """Get current volume levels for all audio streams."""
     return format_json(termux('termux-volume'))
 
 
 @mcp.tool()
 async def toggle_torch(enabled: bool = True) -> str:
-    """Turn the flashlight (torch) on or off.
-
-    Args:
-        enabled: True to turn on, False to turn off
-    """
+    """Toggle flashlight on/off."""
     return termux('termux-torch', ['on' if enabled else 'off']) or f"Torch {'on' if enabled else 'off'}"
 
 
 @mcp.tool()
 async def vibrate(duration_ms: int = 1000, force: bool = False) -> str:
-    """Vibrate the phone.
-
-    Args:
-        duration_ms: Vibration duration in milliseconds (default: 1000)
-        force: Vibrate even in silent mode (default: False)
-    """
+    """Vibrate phone. force=True to vibrate in silent mode."""
     args = ['-d', str(duration_ms)]
     if force:
         args.append('-f')
-    return termux('termux-vibrate', args) or f"Vibrated for {duration_ms}ms"
+    return termux('termux-vibrate', args) or f"Vibrated {duration_ms}ms"
 
 
 @mcp.tool()
 async def text_to_speech(text: str, language: str = "zh", rate: float = 1.0) -> str:
-    """Speak text aloud using text-to-speech.
-
-    Args:
-        text: Text to speak
-        language: Language code (e.g. 'en', 'zh', 'ja') (default: zh)
-        rate: Speech rate, 1.0 is normal (default: 1.0)
-    """
-    args = ['-l', language, '-r', str(rate), text]
-    return termux('termux-tts-speak', args, timeout=60) or f"Speaking: {text[:80]}"
+    """Speak text aloud via TTS."""
+    return termux('termux-tts-speak', ['-l', language, '-r', str(rate), text], timeout=60) or f"Speaking: {text[:80]}"
 
 
 @mcp.tool()
 async def get_fingerprint() -> str:
-    """Prompt for fingerprint authentication on the device."""
+    """Prompt for fingerprint authentication."""
     return format_json(termux('termux-fingerprint', timeout=30))
 
 
 @mcp.tool()
 async def get_screen_brightness() -> str:
-    """Get current screen brightness level.
-
-    Requires ADB wireless debugging enabled on Android 12+.
-    """
-    # Try via privileged shell (rish / ADB)
+    """Get screen brightness (requires Shizuku/ADB on Android 12+)."""
     if privileged_available():
         r = run('settings get system screen_brightness', shell=True, timeout=5)
         val = r.get('stdout', '').strip()
         if val:
-            return f"Screen brightness: {val}/255"
-        # Try dumpsys as fallback
+            return f"Brightness: {val}/255"
         r = run("dumpsys display | grep -i brightness | head -5", shell=True, timeout=5)
         if r.get('stdout', '').strip():
             return r['stdout']
-
-    # Try getprop (works without ADB on some ROMs)
     r = run('getprop ro.sf.lcd_brightness', shell=True, timeout=3)
     val = r.get('stdout', '').strip()
     if val:
-        return f"Screen brightness: {val} (from getprop)"
-
-    return ("Screen brightness: unknown.\n"
-            "需要 Shizuku 或 ADB 无线调试才能查询亮度。\n"
-            "💡 确保 Shizuku 已启动（推荐），或开启无线调试后用 adb_connect 连接。")
+        return f"Brightness: {val} (getprop)"
+    return ("无法获取亮度。需要 Shizuku 或 ADB 无线调试。\n"
+            "💡 确保 Shizuku 已启动，或开启无线调试后 adb_connect。")
 
 
 @mcp.tool()
 async def set_screen_brightness(level: int) -> str:
-    """Set screen brightness level.
-
-    Requires ADB wireless debugging enabled on Android 12+.
-
-    Args:
-        level: Brightness level 0-255
-    """
+    """Set screen brightness (0-255). Requires Shizuku/ADB."""
     level = max(0, min(255, level))
     if privileged_available():
         r = run(f'settings put system screen_brightness {level}', shell=True, timeout=5)
         if r['success']:
             return f"Brightness set to {level}/255"
-        return f"Error: {r.get('stderr', 'ADB/rish command failed')}"
-    return ("无法设置亮度：需要 Shizuku 或 ADB 无线调试。\n"
-            "💡 确保 Shizuku 已启动（推荐），或开启无线调试后用 adb_connect 连接。")
+        return f"Error: {r.get('stderr', 'Failed')}"
+    return "无法设置亮度。需要 Shizuku 或 ADB。"

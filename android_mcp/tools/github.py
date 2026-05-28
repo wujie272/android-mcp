@@ -1,324 +1,218 @@
-"""
-╔══════════════════════════════════════════════════════╗
-║  GitHub 工具集成 — Android MCP 内嵌版               ║
-║  仓库/Issue/文件/搜索 — 基于 gh token               ║
-║  原服务: github-mcp (port 3510) → 已合并到此处      ║
-╚══════════════════════════════════════════════════════╝
-"""
+"""GitHub tools: repo info, search, files, issues, languages, branches."""
 
 import os
 import base64
 from android_mcp.app import mcp
 
-# ── GitHub Token 加载 ──
 GH_TOKEN = None
 GH_USER = "jaye2720"
 
 
-def _load_gh_token():
-    """从 gh CLI 配置或环境变量中读取 GitHub Token"""
+def _load_token():
     global GH_TOKEN, GH_USER
-    gh_config = os.path.expanduser("~/.config/gh/hosts.yml")
-    if os.path.isfile(gh_config):
+    gh_cfg = os.path.expanduser("~/.config/gh/hosts.yml")
+    if os.path.isfile(gh_cfg):
         try:
-            with open(gh_config, "r") as f:
+            with open(gh_cfg) as f:
                 for line in f:
                     if "oauth_token:" in line:
                         GH_TOKEN = line.split(":", 1)[1].strip().strip('"').strip("'")
                     if "user:" in line:
-                        user = line.split(":", 1)[1].strip()
-                        if user and user != GH_USER:
-                            GH_USER = user
+                        u = line.split(":", 1)[1].strip()
+                        if u:
+                            GH_USER = u
         except Exception:
             pass
     GH_TOKEN = GH_TOKEN or os.environ.get("GITHUB_TOKEN")
 
 
 def _headers():
-    """构建 GitHub API 请求头"""
-    return {
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": f"MCP-GitHub/{GH_USER}",
-        **({"Authorization": f"Bearer {GH_TOKEN}"} if GH_TOKEN else {}),
-    }
+    return {"Accept": "application/vnd.github.v3+json", "User-Agent": f"MCP-GitHub/{GH_USER}"} | \
+           ({"Authorization": f"Bearer {GH_TOKEN}"} if GH_TOKEN else {})
 
 
-def _gh_api_url(path: str) -> str:
+def _url(path: str) -> str:
     return f"https://api.github.com{path}"
 
 
-# ============================================================
-#  工具函数 — 仓库信息
-# ============================================================
+_load_token()
 
-@mcp.tool(
-    name="github_repo",
-    description="获取 GitHub 仓库的详细信息（Star、Fork、描述、许可证等）",
-)
+
+@mcp.tool()
 async def github_repo(owner: str, repo: str) -> str:
-    """获取仓库详细信息"""
+    """Get repo info: stars, forks, description, license."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(_gh_api_url(f"/repos/{owner}/{repo}"), headers=_headers())
-            if resp.status_code != 200:
-                return f"❌ 查询失败 (HTTP {resp.status_code}): {resp.text[:200]}"
-            d = resp.json()
-            return (
-                f"📦 {d['full_name']}\n"
-                f"   ⭐ {d['stargazers_count']}  🍴 {d['forks_count']}\n"
-                f"   👁️ {d.get('subscribers_count', 'N/A')}  🐛 {d.get('open_issues_count', 0)}\n"
-                f"   📝 {d.get('description', '无描述')}\n"
-                f"   📅 创建: {d['created_at'][:10]}  更新: {d['updated_at'][:10]}\n"
-                f"   🌐 {d.get('homepage', '无主页') or '无主页'}\n"
-                f"   📋 {d.get('license', {}).get('spdx_id', '无许可证') if d.get('license') else '无许可证'}\n"
-                f"   🔗 {d['html_url']}"
-            )
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_url(f"/repos/{owner}/{repo}"), headers=_headers())
+            if r.status_code != 200:
+                return f"❌ HTTP {r.status_code}: {r.text[:200]}"
+            d = r.json()
+            return (f"📦 {d['full_name']}\n   ⭐ {d['stargazers_count']}  🍴 {d['forks_count']}\n"
+                    f"   👁️ {d.get('subscribers_count', '?')}  🐛 {d.get('open_issues_count', 0)}\n"
+                    f"   📝 {d.get('description', '无描述')}\n"
+                    f"   📅 {d['created_at'][:10]}  📋 {d.get('license', {}).get('spdx_id', '无') if d.get('license') else '无'}\n"
+                    f"   🔗 {d['html_url']}")
     except Exception as e:
-        return f"❌ GitHub 查询失败: {e}"
+        return f"❌ {e}"
 
 
-@mcp.tool(
-    name="github_list_repos",
-    description="列出指定 GitHub 用户的仓库，支持排序和数量控制",
-)
+@mcp.tool()
 async def github_list_repos(username: str = "", sort: str = "updated", per_page: int = 20) -> str:
-    """列出用户的 GitHub 仓库"""
+    """List user's repos. sort: updated/created/pushed/full_name."""
     import httpx
     user = username or GH_USER
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                _gh_api_url(f"/users/{user}/repos"),
-                params={"sort": sort, "per_page": min(per_page, 100), "type": "owner"},
-                headers=_headers(),
-            )
-            if resp.status_code != 200:
-                return f"❌ 查询失败 (HTTP {resp.status_code})"
-            repos = resp.json()
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_url(f"/users/{user}/repos"),
+                            params={"sort": sort, "per_page": min(per_page, 100), "type": "owner"},
+                            headers=_headers())
+            if r.status_code != 200:
+                return f"❌ HTTP {r.status_code}"
+            repos = r.json()
             if not repos:
-                return f"用户 {user} 没有公开仓库"
-            lines = [f"📋 {user} 的仓库 ({len(repos)}):\n"]
-            for r in repos:
-                lines.append(f"  📦 {r['name']}")
-                if r.get('description'):
-                    lines.append(f"     {r['description'][:60]}")
-                lines.append(f"     ⭐{r['stargazers_count']}  🍴{r['forks_count']}  🔗{r['html_url']}")
-                lines.append("")
+                return f"{user} has no public repos"
+            lines = [f"📋 {user} ({len(repos)} repos):"]
+            for rp in repos:
+                lines.append(f"\n  📦 {rp['name']}")
+                if rp.get('description'):
+                    lines.append(f"     {rp['description'][:60]}")
+                lines.append(f"     ⭐{rp['stargazers_count']}  🍴{rp['forks_count']}  🔗{rp['html_url']}")
             return "\n".join(lines)
     except Exception as e:
-        return f"❌ 查询失败: {e}"
+        return f"❌ {e}"
 
 
-@mcp.tool(
-    name="github_search",
-    description="搜索 GitHub 上的仓库、代码或 Issue，支持 repositories / code / issues 三种类型",
-)
+@mcp.tool()
 async def github_search(query: str, search_type: str = "repositories", max_results: int = 5) -> str:
-    """
-    搜索 GitHub 上的仓库、代码或 Issue
-    - search_type: repositories / code / issues
-    """
+    """Search GitHub. search_type: repositories/code/issues."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                _gh_api_url(f"/search/{search_type}"),
-                params={"q": query, "per_page": min(max_results, 30)},
-                headers=_headers(),
-            )
-            if resp.status_code != 200:
-                return f"❌ 搜索失败 (HTTP {resp.status_code})"
-            data = resp.json()
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_url(f"/search/{search_type}"),
+                            params={"q": query, "per_page": min(max_results, 30)},
+                            headers=_headers())
+            if r.status_code != 200:
+                return f"❌ HTTP {r.status_code}"
+            data = r.json()
             items = data.get("items", [])
-            total = data.get("total_count", 0)
-
             if not items:
-                return f"未找到 '{query}' 的搜索结果"
-
-            lines = [f"🔍 搜索 '{query}' ({search_type}) — 共 {total} 条结果:\n"]
+                return f"Not found: '{query}'"
+            lines = [f"🔍 '{query}' ({search_type}) — {data.get('total_count', 0)} results:"]
             for item in items[:max_results]:
                 if search_type == "repositories":
-                    lines.append(f"  📦 {item['full_name']}")
-                    lines.append(f"     ⭐{item['stargazers_count']}  🍴{item['forks_count']}")
+                    lines.append(f"\n  📦 {item['full_name']}  ⭐{item['stargazers_count']}  🍴{item['forks_count']}")
                     if item.get('description'):
                         lines.append(f"     {item['description'][:80]}")
-                    lines.append(f"     🔗 {item['html_url']}")
                 elif search_type == "issues":
-                    lines.append(f"  🐛 {item['title']}")
-                    lines.append(f"     #{item['number']}  {'✅ 已关闭' if item.get('state') == 'closed' else '🟢 开放'}  "
-                                 f"👤 {item['user']['login']}")
-                    lines.append(f"     🔗 {item['html_url']}")
-                    if item.get('body'):
-                        lines.append(f"     {item['body'][:100]}...")
+                    lines.append(f"\n  🐛 #{item['number']} {item['title']}")
+                    lines.append(f"     {'✅' if item.get('state') == 'closed' else '🟢'} 👤{item['user']['login']}")
                 elif search_type == "code":
-                    lines.append(f"  📄 {item['path']}")
-                    lines.append(f"     📦 {item['repository']['full_name']}")
-                    lines.append(f"     🔗 {item['html_url']}")
-                lines.append("")
+                    lines.append(f"\n  📄 {item['path']}  📦 {item['repository']['full_name']}")
+                lines.append(f"     🔗 {item['html_url']}")
             return "\n".join(lines)
     except Exception as e:
-        return f"❌ 搜索失败: {e}"
+        return f"❌ {e}"
 
 
-@mcp.tool(
-    name="github_get_file",
-    description="读取 GitHub 仓库中的文件内容或列出目录结构",
-)
+@mcp.tool()
 async def github_get_file(owner: str, repo: str, path: str, branch: str = "main") -> str:
-    """读取仓库中的文件内容"""
+    """Read repo file or list directory."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                _gh_api_url(f"/repos/{owner}/{repo}/contents/{path}"),
-                params={"ref": branch},
-                headers=_headers(),
-            )
-            if resp.status_code != 200:
-                return f"❌ 读取失败 (HTTP {resp.status_code}): {resp.text[:200]}"
-            d = resp.json()
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_url(f"/repos/{owner}/{repo}/contents/{path}"),
+                            params={"ref": branch}, headers=_headers())
+            if r.status_code != 200:
+                return f"❌ HTTP {r.status_code}: {r.text[:200]}"
+            d = r.json()
             if isinstance(d, list):
-                # 是目录
-                lines = [f"📂 {path} 的内容:\n"]
+                lines = [f"📂 {path}:"]
                 for item in d:
-                    icon = "📁" if item["type"] == "dir" else "📄"
-                    lines.append(f"  {icon} {item['name']}")
+                    lines.append(f"  {'📁' if item['type'] == 'dir' else '📄'} {item['name']}")
                 return "\n".join(lines)
-            else:
-                # 是文件
-                content = base64.b64decode(d["content"]).decode("utf-8", errors="replace")
-                size = d["size"]
-                return f"📄 {path}  ({size} 字节, {d.get('sha', '')[:7]})\n\n---\n\n{content[:5000]}" + (
-                    "\n\n... (内容过长已截断)" if size > 5000 else ""
-                )
+            content = base64.b64decode(d["content"]).decode("utf-8", errors="replace")
+            size = d["size"]
+            return f"📄 {path} ({size}B, {d.get('sha', '')[:7]})\n\n---\n\n{content[:5000]}" + \
+                   ("\n\n... (截断)" if size > 5000 else "")
     except Exception as e:
-        return f"❌ 读取失败: {e}"
+        return f"❌ {e}"
 
 
-@mcp.tool(
-    name="github_list_issues",
-    description="列出 GitHub 仓库的 Issue，支持按状态过滤（open / closed / all）",
-)
+@mcp.tool()
 async def github_list_issues(owner: str, repo: str, state: str = "open", max_results: int = 10) -> str:
-    """列出仓库的 Issue"""
+    """List repo issues. state: open/closed/all."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                _gh_api_url(f"/repos/{owner}/{repo}/issues"),
-                params={"state": state, "per_page": min(max_results, 100)},
-                headers=_headers(),
-            )
-            if resp.status_code != 200:
-                return f"❌ 查询失败 (HTTP {resp.status_code})"
-            issues = resp.json()
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_url(f"/repos/{owner}/{repo}/issues"),
+                            params={"state": state, "per_page": min(max_results, 100)},
+                            headers=_headers())
+            if r.status_code != 200:
+                return f"❌ HTTP {r.status_code}"
+            issues = r.json()
             if not issues:
-                return f"{owner}/{repo} 没有 {state} 的 Issue"
-            lines = [f"🐛 {owner}/{repo} 的 Issue ({state}, {len(issues)} 条):\n"]
+                return f"No {state} issues in {owner}/{repo}"
+            lines = [f"🐛 {owner}/{repo} ({state}, {len(issues)}):"]
             for i in issues:
-                lines.append(f"  #{i['number']} {i['title']}")
-                lines.append(f"     👤 {i['user']['login']}  🏷️ {', '.join([l['name'] for l in i.get('labels', [])]) or '无标签'}")
+                labels = ', '.join([l['name'] for l in i.get('labels', [])]) or '无标签'
+                lines.append(f"\n  #{i['number']} {i['title']}")
+                lines.append(f"     👤{i['user']['login']}  🏷️ {labels}")
                 lines.append(f"     🔗 {i['html_url']}")
-                lines.append("")
             return "\n".join(lines)
     except Exception as e:
-        return f"❌ 查询失败: {e}"
+        return f"❌ {e}"
 
 
-@mcp.tool(
-    name="github_repo_languages",
-    description="获取 GitHub 仓库的编程语言占比统计",
-)
+@mcp.tool()
 async def github_repo_languages(owner: str, repo: str) -> str:
-    """获取仓库的语言占比"""
+    """Get repo language breakdown."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                _gh_api_url(f"/repos/{owner}/{repo}/languages"),
-                headers=_headers(),
-            )
-            if resp.status_code != 200:
-                return f"❌ 查询失败 (HTTP {resp.status_code})"
-            langs = resp.json()
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_url(f"/repos/{owner}/{repo}/languages"), headers=_headers())
+            if r.status_code != 200:
+                return f"❌ HTTP {r.status_code}"
+            langs = r.json()
             if not langs:
-                return f"{owner}/{repo} 未检测到编程语言"
+                return f"No languages detected."
             total = sum(langs.values())
-            lines = [f"📊 {owner}/{repo} 语言占比:\n"]
+            lines = [f"📊 {owner}/{repo}:"]
             for lang, bytes_count in sorted(langs.items(), key=lambda x: -x[1]):
                 pct = bytes_count / total * 100
                 bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
                 lines.append(f"  {lang:15s} {bar} {pct:.1f}%")
             return "\n".join(lines)
     except Exception as e:
-        return f"❌ 查询失败: {e}"
+        return f"❌ {e}"
 
 
-@mcp.tool(
-    name="github_list_branches",
-    description="列出 GitHub 仓库的所有分支",
-)
+@mcp.tool()
 async def github_list_branches(owner: str, repo: str, max_results: int = 20) -> str:
-    """列出仓库的分支"""
+    """List repo branches."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                _gh_api_url(f"/repos/{owner}/{repo}/branches"),
-                params={"per_page": min(max_results, 100)},
-                headers=_headers(),
-            )
-            if resp.status_code != 200:
-                return f"❌ 查询失败 (HTTP {resp.status_code})"
-            branches = resp.json()
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_url(f"/repos/{owner}/{repo}/branches"),
+                            params={"per_page": min(max_results, 100)},
+                            headers=_headers())
+            if r.status_code != 200:
+                return f"❌ HTTP {r.status_code}"
+            branches = r.json()
             if not branches:
-                return f"{owner}/{repo} 没有分支"
-            lines = [f"🌿 {owner}/{repo} 的分支 ({len(branches)}):\n"]
+                return "No branches found."
+            lines = [f"🌿 {owner}/{repo} ({len(branches)} branches):"]
             for b in branches:
-                protected = "🔒" if b.get("protected") else "  "
-                lines.append(f"  {protected} {b['name']}  →  {b['commit']['sha'][:7]}")
+                sha = b['commit']['sha'][:7]
+                lines.append(f"  🌱 {b['name']:<30} {sha}")
             return "\n".join(lines)
     except Exception as e:
-        return f"❌ 查询失败: {e}"
+        return f"❌ {e}"
 
 
-# ── 启动时加载 Token ──
-_load_gh_token()
-
-
-# ============================================================
-#  Token 刷新
-# ============================================================
-
-@mcp.tool(
-    name="github_refresh_token",
-    description="手动刷新 GitHub Token（重读 gh CLI 配置和环境变量），无需重启服务",
-)
+@mcp.tool()
 async def github_refresh_token() -> str:
-    """重新加载 GitHub Token（从 gh CLI 配置或环境变量）。
-
-    如果之前配置了 GitHub Token 但服务启动时未读到，
-    调用此工具可重新加载，无需重启服务。
-    """
-    global GH_TOKEN, GH_USER
-    old_token = GH_TOKEN
+    """Manually refresh GitHub token (re-reads gh CLI config and env vars)."""
     GH_TOKEN = None
-    _load_gh_token()
-
-    parts = []
-    if GH_TOKEN:
-        masked = GH_TOKEN[:4] + "…" + GH_TOKEN[-4:] if len(GH_TOKEN) > 8 else "***"
-        parts.append(f"✅ Token 已加载: {masked}")
-    else:
-        parts.append("⚠️  未找到 Token。配置方式：")
-        parts.append("   1. `gh auth login`（推荐，自动保存到 ~/.config/gh/hosts.yml）")
-        parts.append("   2. 设置环境变量 `export GITHUB_TOKEN=ghp_xxx`")
-
-    parts.append(f"👤 当前用户: {GH_USER}")
-    if old_token != GH_TOKEN:
-        parts.append("🔄 Token 已更新（与之前不同）")
-    else:
-        parts.append("ℹ️  Token 未变化")
-
-    return "\n".join(parts)
+    _load_token()
+    return f"Token refreshed. User: {GH_USER}" + ("" if GH_TOKEN else " (no token)")
