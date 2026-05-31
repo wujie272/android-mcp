@@ -70,7 +70,7 @@ def _decode_output(val):
 _shizuku_cache = None
 _shizuku_cache_time = 0.0
 _SHIZUKU_CACHE_TTL_OK = 30.0
-_SHIZUKU_CACHE_TTL_FAIL = 5.0
+_SHIZUKU_CACHE_TTL_FAIL = 60.0
 
 
 def shizuku_available() -> bool:

@@ -16,4 +16,5 @@ import android_mcp.tools.system_control
 import android_mcp.tools.media
 import android_mcp.tools.adb
 import android_mcp.tools.shizuku_window
+import android_mcp.tools.weather  # 🌤️ weather tools (wttr.in + ip-api + WAQI)
 import android_mcp.resources

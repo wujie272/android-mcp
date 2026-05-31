@@ -1,8 +1,9 @@
 """File system tools: read, write, edit, search, list, execute commands."""
 
 import os
-import json
+import re
 import shutil
+import difflib
 import time as _time
 from pathlib import Path
 from datetime import datetime
@@ -12,8 +13,6 @@ from android_mcp.lib.utils import async_run, ensure_path_env
 from android_mcp.lib.constants import HOME, SDCARD, SDCARD_SHORT
 
 _TRASH_DIR = HOME / '.trash'
-
-MAX_OUTPUT_CHARS = 10000
 
 
 # ── Read / Write ──
@@ -30,9 +29,6 @@ async def read_file(file_path: str) -> str:
         for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
             try:
                 content = path.read_text(encoding=enc)
-                if len(content) > MAX_OUTPUT_CHARS:
-                    content = (content[:MAX_OUTPUT_CHARS]
-                               + f"\n\n⚠️ [截断: 共 {len(content):,} 字符, 仅显示前 {MAX_OUTPUT_CHARS:,}]")
                 return content
             except UnicodeDecodeError:
                 continue
@@ -69,7 +65,6 @@ async def edit_file(file_path: str, old_text: str, new_text: str, dry_run: bool 
         return f"Error: Text not found in {file_path}"
     new_content = content.replace(old_text, new_text, 1)
     if dry_run:
-        import difflib
         diff = difflib.unified_diff(content.splitlines(keepends=True), new_content.splitlines(keepends=True))
         return "--- DRY RUN (NOT applied) ---\n" + "".join(diff)
     try:
@@ -79,536 +74,344 @@ async def edit_file(file_path: str, old_text: str, new_text: str, dry_run: bool 
         return f"Error writing file: {e}"
 
 
-# ── Search ──
+# ══════════════════════════════════════════════
+#  统一搜索引擎：fd + rg + fzf 三引擎
+# ══════════════════════════════════════════════
+
+_AUTO_SKIP_DIRS = {'node_modules', '.git', '.cargo', '.gradle', '__pycache__',
+                   '.venv', 'venv', 'env', 'vendor', '.trash', 'build', 'dist'}
+
+
+def _build_fd_cmd(
+    root: Path, pattern: str | None, exclude: set,
+    max_depth: int | None, file_types: list[str] | None,
+    modified_days: int | None, min_size: int | None,
+    max_size: int | None, case_sensitive: bool,
+    use_regex: bool, absolute: bool = False,
+) -> list[str]:
+    """构建 fd 命令（比 find 快 5~10x，支持原生过滤）。"""
+    cmd = ['fd', '--type', 'f', '--color', 'never']
+    if absolute:
+        cmd.append('--absolute-path')
+    if not case_sensitive:
+        cmd.append('-i')
+    if pattern and pattern != '*':
+        if use_regex:
+            cmd.extend(['--regex', pattern])
+        else:
+            cmd.extend(['--glob', pattern])
+    else:
+        cmd.append('.')
+    if max_depth is not None:
+        cmd.extend(['--max-depth', str(max_depth)])
+    if file_types:
+        for t in file_types:
+            cmd.extend(['-e', t.strip('.').lower()])
+    if modified_days is not None:
+        cmd.extend(['--changed-within', f'{modified_days}day'])
+    if min_size is not None:
+        cmd.extend(['-s', str(min_size)])
+    if max_size is not None:
+        cmd.extend(['-S', str(max_size)])
+    for exc in sorted(exclude):
+        cmd.extend(['-E', exc])
+    cmd.append(str(root))
+    return cmd
+
+
+async def _search_by_name_fd(
+    root: Path, pattern: str, exclude: set,
+    max_results: int, max_depth: int | None, file_types: list[str] | None,
+    modified_days: int | None, min_size: int | None, max_size: int | None,
+    sort_by: str, sort_order: str, case_sensitive: bool, use_regex: bool,
+) -> tuple[list[dict], int]:
+    """🚀 fd 高速文件名搜索（原生 C 实现，比 find 快 5~10x）。"""
+    fd_cmd = _build_fd_cmd(
+        root, pattern, exclude, max_depth, file_types,
+        modified_days, min_size, max_size, case_sensitive, use_regex,
+        absolute=True,
+    )
+    r = await async_run(fd_cmd, timeout=30, shell=False)
+    if not r.get('success') or not r.get('stdout', '').strip():
+        return [], 0
+
+    all_lines = r['stdout'].strip().split('\n')
+    results = []
+    for fp in all_lines[:max_results]:
+        fp = fp.strip()
+        if not fp:
+            continue
+        try:
+            st = Path(fp).stat()
+            results.append({
+                'path': fp, 'name': Path(fp).name,
+                'size': st.st_size, 'mtime': st.st_mtime, 'is_dir': False,
+            })
+        except Exception:
+            pass
+
+    results.sort(key=lambda x: x['size'] if sort_by == 'size' else
+                 x['mtime'] if sort_by == 'date' else x['name'].lower(),
+                 reverse=(sort_order == 'desc'))
+    return results, len(all_lines)
+
+
+async def _fuzzy_search(
+    root: Path, pattern: str, exclude: set,
+    max_results: int, max_depth: int | None, file_types: list[str] | None,
+    modified_days: int | None, min_size: int | None, max_size: int | None,
+    sort_by: str, sort_order: str,
+) -> tuple[list[dict], int]:
+    """🔮 fzf 模糊文件名搜索 + fd 前置过滤。"""
+    # Step 1: fd 快速列出候选文件（带过滤条件）
+    fd_cmd = _build_fd_cmd(
+        root, None, exclude, max_depth, file_types,
+        modified_days, min_size, max_size, case_sensitive=False,
+        use_regex=False,
+    )
+    r = await async_run(fd_cmd, timeout=30, shell=False)
+    if not r.get('success') or not r.get('stdout', '').strip():
+        return [], 0
+
+    # Step 2: fzf -f 非交互式模糊匹配
+    all_paths = r['stdout'].strip()
+    try:
+        import subprocess
+        fzf_proc = subprocess.run(
+            ['fzf', '-f', pattern],
+            input=all_paths, capture_output=True, text=True, timeout=15,
+        )
+        if fzf_proc.returncode != 0 or not fzf_proc.stdout.strip():
+            return [], 0
+        matched = fzf_proc.stdout.strip().split('\n')
+    except FileNotFoundError:
+        return [], 0
+    except Exception:
+        return [], 0
+
+    results = []
+    for fp in matched[:max_results]:
+        fp = fp.strip()
+        if not fp:
+            continue
+        full = str(root / fp) if not Path(fp).is_absolute() else fp
+        try:
+            st = Path(full).stat()
+            results.append({
+                'path': full, 'name': Path(full).name,
+                'size': st.st_size, 'mtime': st.st_mtime, 'is_dir': False,
+            })
+        except Exception:
+            pass
+
+    results.sort(key=lambda x: x['size'] if sort_by == 'size' else
+                 x['mtime'] if sort_by == 'date' else x['name'].lower(),
+                 reverse=(sort_order == 'desc'))
+    return results, len(matched)
+
+
+async def _search_by_content_rg(
+    query: str, root: Path, pattern: str | None, exclude: set,
+    max_results: int, file_types: list[str] | None,
+    modified_days: int | None, min_size: int | None, max_size: int | None,
+    sort_by: str, sort_order: str, case_sensitive: bool,
+    use_regex: bool, context_lines: int, fuzzy: bool = False,
+) -> tuple[list[dict], int]:
+    """🔬 rg 内容搜索 → fd 元数据过滤（rg 最快，fd 次优）。"""
+
+    # Step 1: rg 找出所有含内容的文件
+    rg_cmd = ['rg', '-l', '--no-heading', '--color', 'never']
+    if use_regex:
+        rg_cmd.append('-P')
+    if not case_sensitive:
+        rg_cmd.append('-i')
+    if pattern:
+        rg_cmd.extend(['-g', pattern])
+    for exc in sorted(exclude):
+        rg_cmd.extend(['-g', f'!{exc}', '-g', f'!**/{exc}/**'])
+    rg_cmd.extend(['--', query, str(root)])
+
+    rg_result = await async_run(rg_cmd, timeout=60, shell=False)
+    if not rg_result.get('success') or not rg_result.get('stdout', '').strip():
+        return [], 0
+
+    matched_paths = set()
+    for line in rg_result['stdout'].strip().split('\n'):
+        p = line.strip()
+        if p:
+            matched_paths.add(p)
+    total_matched = len(matched_paths)
+
+    # Step 2: 元数据过滤（仅在已匹配文件上操作，量少则快）
+    results = []
+    for fp in sorted(matched_paths)[:max_results]:
+        p = Path(fp)
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+
+        # 扩展名过滤
+        if file_types:
+            ext = p.suffix.lower().lstrip('.')
+            if ext not in [t.strip('.').lower() for t in file_types]:
+                continue
+        # 时间过滤
+        if modified_days is not None:
+            age = (_time.time() - st.st_mtime) / 86400
+            if age > modified_days:
+                continue
+        # 大小过滤
+        if min_size is not None and st.st_size < min_size:
+            continue
+        if max_size is not None and st.st_size > max_size:
+            continue
+
+        results.append({
+            'path': str(p), 'name': p.name,
+            'size': st.st_size, 'mtime': st.st_mtime, 'is_dir': False,
+        })
+
+    results.sort(key=lambda x: x['size'] if sort_by == 'size' else
+                 x['mtime'] if sort_by == 'date' else x['name'].lower(),
+                 reverse=(sort_order == 'desc'))
+    return results, total_matched
+
+
+def _format_search_results(results: list[dict], root_str: str,
+                           pattern: str, total_found: int, max_results: int) -> str:
+    """统一格式化搜索结果。"""
+    if not results:
+        return "🔍 未找到匹配的文件"
+
+    ext_count: dict[str, int] = {}
+    total_size = 0
+    for r in results:
+        ext = Path(r['name']).suffix.lower() or '(无后缀)'
+        ext_count[ext] = ext_count.get(ext, 0) + 1
+        total_size += r['size']
+
+    lines = [
+        f"🔍 搜索: {root_str} 匹配: '{pattern}'",
+        f"📊 共 {total_found} 项" +
+        (f"，显示前 {max_results} 项" if total_found > max_results else "") +
+        f" | 总大小: {_fmt_size(total_size)}",
+        "",
+    ]
+
+    top_exts = sorted(ext_count.items(), key=lambda x: -x[1])[:8]
+    if len(top_exts) > 1:
+        ext_summary = "  ".join(f"{ext} ×{cnt}" for ext, cnt in top_exts)
+        lines.append(f"📈 类型分布: {ext_summary}")
+        if len(ext_count) > 8:
+            lines.append(f"   ...及其他 {len(ext_count) - 8} 种类型")
+        lines.append("")
+
+    for r in results:
+        size_str = _fmt_size(r['size']) if r['size'] >= 0 else ""
+        date_str = ""
+        if r.get('mtime'):
+            date_str = datetime.fromtimestamp(r['mtime']).strftime('%Y-%m-%d %H:%M')
+        rel = r['path']
+        if rel.startswith(root_str):
+            rel = rel[len(root_str):].lstrip('/')
+        lines.append(f"📄 {rel:<50s} {size_str:>10s}  {date_str}")
+
+    return "\n".join(lines)
+
 
 @mcp.tool()
-async def search_files(path: str | None = None, pattern: str | None = None,
-                       exclude_patterns: list[str] | None = None) -> str:
-    """Recursively search files matching a glob pattern."""
-    import fnmatch
+async def search_files(
+    query: str | None = None,
+    path: str | None = None,
+    pattern: str | None = None,
+    exclude_patterns: list[str] | None = None,
+    max_results: int = 200,
+    max_depth: int | None = None,
+    file_types: list[str] | None = None,
+    modified_days: int | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
+    sort_by: str = "name",
+    sort_order: str = "asc",
+    case_sensitive: bool = False,
+    use_regex: bool = False,
+    context_lines: int = 0,
+    fuzzy: bool = False,
+) -> str:
+    """🔍 统一搜索：文件名 + 内容 + 元数据全维度过滤。
+
+    三合一引擎：
+    · 无 query → 文件名搜索（fd，比 find 快 5~10x）
+    · 有 query → 内容搜索（ripgrep）→ 元数据过滤
+    · fuzzy=True → 模糊文件名搜索（fzf）
+
+    自动跳过 node_modules/.git/.cargo 等大目录。
+
+    Args:
+        query: 内容关键词（不传则仅按文件名搜索）
+        path: 搜索目录（默认当前目录）
+        pattern: 文件名 glob 模式，如 "*.md"、"*test*"（默认 "*"）
+        exclude_patterns: 排除模式，如 ["node_modules", ".git"]
+        max_results: 最大返回数（默认 200）
+        max_depth: 最大搜索深度
+        file_types: 扩展名过滤，如 ["md", "py"]
+        modified_days: 最近 N 天内修改
+        min_size: 大小下限（字节）
+        max_size: 大小上限（字节）
+        sort_by: "name" / "size" / "date"（默认 "name"）
+        sort_order: "asc" / "desc"（默认 "asc"）
+        case_sensitive: 大小写敏感（默认 False）
+        use_regex: 将 pattern/query 视为正则（默认 False）
+        context_lines: 内容匹配上下文行数（默认 0，仅 query 时有效）
+        fuzzy: 启用 fzf 模糊文件名匹配（默认 False）
+    """
     if path is None:
         path = "."
     if pattern is None:
         pattern = "*"
     root = Path(path)
     if not root.exists() or not root.is_dir():
-        return f"Error: Invalid directory: {path}"
-    exclude = exclude_patterns or []
-    results = []
-    try:
-        for f in sorted(root.rglob(pattern)):
-            rel = str(f.relative_to(root)) if f != root else ''
-            if any(fnmatch.fnmatch(rel, exc) for exc in exclude) or any(fnmatch.fnmatch(f.name, exc) for exc in exclude):
-                continue
-            try:
-                stat = f.stat()
-                kind = "📁" if f.is_dir() else "📄"
-                size = f"({stat.st_size:,} bytes)" if f.is_file() else ""
-                results.append(f"{kind} {f} {size}")
-            except Exception:
-                results.append(f"? {f}")
-    except PermissionError:
-        return f"Error: Permission denied: {path}"
-    if not results:
-        return f"No files matching '{pattern}' in {root}"
-    return f"Found {len(results)} in {root}:\n\n" + "\n".join(results)
-
-
-# ── Directory Tree ──
-
-@mcp.tool()
-async def directory_tree(path: str | None = None, exclude_patterns: list[str] | None = None) -> str:
-    """Get directory tree as JSON."""
-    import fnmatch
-    if path is None:
-        path = "."
-
-    def build_tree(dir_path: Path):
-        items = []
-        try:
-            for item in sorted(dir_path.iterdir()):
-                if exclude_patterns and any(fnmatch.fnmatch(item.name, exc) for exc in exclude_patterns):
-                    continue
-                if item.is_dir():
-                    items.append({'name': item.name, 'type': 'directory', 'children': build_tree(item)})
-                else:
-                    items.append({'name': item.name, 'type': 'file'})
-        except PermissionError:
-            items.append({'name': '(denied)', 'type': 'file'})
-        return items
-
-    root = Path(path)
-    if not root.exists() or not root.is_dir():
-        return f"Error: Invalid directory: {path}"
-    tree = [{'name': str(root.absolute()), 'type': 'directory', 'children': build_tree(root)}]
-    return json.dumps(tree, indent=2, ensure_ascii=False)
-
-
-# ── File Info ──
-
-@mcp.tool()
-async def get_file_info(file_path: str) -> str:
-    """Get file/directory metadata: size, dates, permissions, owner."""
-    path = Path(file_path)
-    if not path.exists():
-        return f"Error: File not found: {file_path}"
-    try:
-        stat = path.stat()
-        info = {'name': path.name, 'path': str(path.absolute()),
-                'type': 'directory' if path.is_dir() else 'file',
-                'size_bytes': stat.st_size,
-                'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                'permissions': oct(stat.st_mode)[-3:]}
-        try:
-            import pwd
-            info['owner'] = pwd.getpwuid(stat.st_uid).pw_name
-        except Exception:
-            info['owner'] = str(stat.st_uid)
-        try:
-            import grp
-            info['group'] = grp.getgrgid(stat.st_gid).gr_name
-        except Exception:
-            info['group'] = str(stat.st_gid)
-        if path.is_symlink():
-            info['symlink_target'] = str(path.resolve())
-        return json.dumps(info, indent=2, ensure_ascii=False)
-    except Exception as e:
-        return f"Error: {e}"
-
-
-# ── List Directory ──
-
-@mcp.tool()
-async def list_directory(directory_path: str | None = None, show_hidden: bool = False) -> str:
-    """List directory contents with sizes and modification times."""
-    if directory_path is None:
-        directory_path = "."
-    path = Path(directory_path)
-    if not path.exists() or not path.is_dir():
-        return f"Error: Invalid directory: {directory_path}"
-    items = []
-    try:
-        for item in sorted(path.iterdir()):
-            if not show_hidden and item.name.startswith('.'):
-                continue
-            try:
-                stat = item.stat()
-                kind = "DIR " if item.is_dir() else "FILE"
-                size = stat.st_size if item.is_file() else 0
-                mtime = datetime.fromtimestamp(stat.st_mtime).strftime('%m-%d %H:%M')
-                items.append(f"{kind} {item.name:<45} {size:>12,} bytes  {mtime}")
-            except Exception:
-                items.append(f"ERR  {item.name}")
-    except PermissionError:
-        return f"Error: Permission denied: {directory_path}"
-    if not items:
-        return f"Directory is empty: {path.absolute()}"
-    return f"Contents of: {path.absolute()}\n{'─' * 70}\n" + "\n".join(items)
-
-
-@mcp.tool()
-async def list_directory_with_sizes(path: str | None = None, sort_by: str = "name") -> str:
-    """List directory sorted by name or size."""
-    if path is None:
-        path = "."
-    root = Path(path)
-    if not root.exists() or not root.is_dir():
-        return f"Error: Invalid directory: {path}"
-    items = []
-    total_files = total_dirs = total_size = 0
-    try:
-        for item in root.iterdir():
-            try:
-                stat = item.stat()
-                entry = {'name': item.name, 'type': 'directory' if item.is_dir() else 'file',
-                         'size': stat.st_size, 'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()}
-                items.append(entry)
-                if item.is_file():
-                    total_files += 1
-                    total_size += stat.st_size
-                else:
-                    total_dirs += 1
-            except Exception:
-                pass
-    except PermissionError:
-        return f"Error: Permission denied: {path}"
-    items.sort(key=lambda x: (x['size'] if 'size' else 0) if sort_by == 'size' else x['name'].lower(),
-               reverse=(sort_by == 'size'))
-    lines = [f"Contents of {root} (sorted by {sort_by})\n"]
-    for item in items:
-        size_str = f"{item['size']:>12,} bytes" if item['type'] == 'file' else ""
-        icon = "📁" if item['type'] == 'directory' else "📄"
-        lines.append(f"{icon} {item['name']:<45} {size_str}  {item['modified']}")
-    lines.append(f"\nFiles: {total_files}  Dirs: {total_dirs}  Total: {total_size:,} bytes")
-    return "\n".join(lines)
-
-
-# ── Allowed Directories ──
-
-@mcp.tool()
-async def list_allowed_directories() -> str:
-    """List accessible directories."""
-    accessible = []
-    for p in [str(HOME), str(SDCARD_SHORT), str(SDCARD)]:
-        path = Path(p)
-        if path.exists():
-            rw = "R/W" if os.access(p, os.R_OK | os.W_OK) else ("R/O" if os.access(p, os.R_OK) else "N/A")
-            accessible.append(f"  {rw}  {p}")
-    return "Accessible:\n" + "\n".join(accessible) if accessible else "None found."
-
-
-# ── Execute Command ──
-
-@mcp.tool()
-async def execute_command(
-    command: str = "",
-    working_directory: str = ".",
-    timeout: int = 30,
-    check_risk: bool = True,
-    stream: bool = False,
-) -> str:
-    """Execute a shell command.
-
-    🔒 Security audit: auto-blocks dangerous commands (rm -rf /, fork bomb, etc.).
-       Use FORCE=1 prefix to bypass: FORCE=1 rm -rf /tmp/cache
-    ⚡ Streaming mode: reads line-by-line, returns partial output on timeout.
-
-    Args:
-        command: Shell command to execute
-        working_directory: Working directory (default: current)
-        timeout: Timeout in seconds (default: 30)
-        check_risk: Enable security audit (default: True)
-        stream: Use streaming execution (default: False)
-    """
-    if not command.strip():
-        return ("❌ 错误：`command` 参数不能为空。\n"
-                "正确用法：execute_command(command='ls -la', working_directory='.', timeout=30)")
-
-    if check_risk:
-        from android_mcp.lib.security import assess_risk, RiskLevel
-        level, msg, sugg = assess_risk(command)
-        if level == RiskLevel.DANGEROUS:
-            return f"{msg}\n命令: `{command}`\n\n{sugg}\n\n💡 如需执行: `FORCE=1 {command}`"
-        if level == RiskLevel.WARNING:
-            return f"{msg}\n命令: `{command}`\n\n{sugg}\n\n💡 如需执行加 FORCE=1 前缀"
-
-    try:
-        if stream:
-            from android_mcp.lib.utils import async_run_streaming
-            result = await async_run_streaming(command, timeout=timeout)
-        else:
-            result = await async_run(command, timeout=timeout, shell=True, cwd=working_directory)
-
-        output = []
-        if result.get('stdout', '').strip():
-            output.append(result['stdout'].strip())
-        if result.get('stderr', '').strip():
-            output.append(f"[stderr] {result['stderr'].strip()}")
-        if result.get('timed_out'):
-            output.append(f"⏱️ [超时 {timeout}s，已返回部分输出]")
-        output.append(f"[exit code: {result.get('returncode', '?')}]")
-        return "\n".join(output)
-    except Exception as e:
-        return f"❌ 命令执行失败 (timeout={timeout}s): {e}"
-
-# ── Search Content (grep) ──
-
-@mcp.tool()
-async def search_content(
-    query: str,
-    path: str | None = None,
-    pattern: str | None = None,
-    use_regex: bool | None = None,
-    case_sensitive: bool | None = None,
-    context_lines: int | None = None,
-    max_results: int | None = None,
-    exclude_patterns: list[str] | None = None,
-) -> str:
-    """🔍 搜索文件内容（基于 ripgrep）。支持正则、上下文行、排除模式。
-
-    Args:
-        query: 要搜索的关键词或正则表达式
-        path: 搜索目录（默认 "."）
-        pattern: 文件名 glob 过滤，如 "*.md"（可选）
-        use_regex: 是否将 query 视为正则（默认 False）
-        case_sensitive: 大小写敏感（默认 False）
-        context_lines: 匹配行上下文的行数，如 2 表示前后各 2 行（默认 0）
-        max_results: 最大返回结果数（默认 50）
-        exclude_patterns: 排除的文件模式，如 ["*.trash", "node_modules"]
-    """
-    from android_mcp.lib.utils import async_run
-
-    if not query or not query.strip():
-        return "❌ query（搜索内容）不能为空"
-
-    if path is None:           path = "."
-    if max_results is None:    max_results = 50
-    if context_lines is None:  context_lines = 0
-    if use_regex is None:      use_regex = False
-    if case_sensitive is None: case_sensitive = False
-
-    # 构建 rg 命令参数列表
-    cmd = ["rg", "--no-heading", "-n"]
-    if use_regex:
-        cmd.append("-P")               # PCRE 正则
-    if not case_sensitive:
-        cmd.append("-i")               # 忽略大小写
-    if context_lines > 0:
-        cmd.extend(["-C", str(context_lines)])
-    # 排除目录/文件
-    if exclude_patterns:
-        for ep in exclude_patterns:
-            cmd.extend(["-g", f"!{ep}"])
-    # 文件名过滤
-    if pattern:
-        cmd.extend(["-g", pattern])
-    # 每个文件最多显示 50 个匹配，防止大文件刷屏
-    cmd.extend(["--max-count", "50"])
-    cmd.extend(["--", query, path])
-
-    result = await async_run(cmd, timeout=30, shell=False)
-
-    if result.get('success'):
-        lines = [l for l in result['stdout'].strip().split('\n') if l.strip()]
-        total = len(lines)
-        if total == 0:
-            return f"🔍 未找到匹配 '{query}' 的内容"
-
-        if total > max_results:
-            display = lines[:max_results]
-            summary = f"🔍 找到至少 {total} 处匹配（显示前 {max_results} 条，共 {total} 处）"
-        else:
-            display = lines
-            summary = f"🔍 找到 {total} 处匹配"
-
-        output_parts = [f"{summary} 在 {path}:\n"]
-        output_parts.extend(display)
-        return "\n".join(output_parts)
-
-    elif result.get('returncode') == 1:
-        return f"🔍 未找到匹配 '{query}' 的内容"
-    else:
-        err_msg = result.get('stderr', '').strip()[:300] or result.get('error', '未知错误')
-        if 'not found' in err_msg.lower() or 'no such file' in err_msg.lower():
-            return "❌ 系统中未安装 ripgrep（rg），请执行: pkg install ripgrep"
-        return f"❌ 搜索出错: {err_msg}"
-
-
-# ── Search Advanced (复合搜索) ──
-
-@mcp.tool()
-async def search_advanced(
-    query: str | None = None,
-    path: str | None = None,
-    pattern: str | None = None,
-    use_regex: bool | None = None,
-    case_sensitive: bool | None = None,
-    max_results: int | None = None,
-    sort_by: str | None = None,
-    sort_order: str | None = None,
-    max_depth: int | None = None,
-    modified_days: int | None = None,
-    min_size: int | None = None,
-    max_size: int | None = None,
-    file_types: list[str] | None = None,
-    context_lines: int | None = None,
-    exclude_patterns: list[str] | None = None,
-) -> str:
-    """🔍 高级复合搜索：文件名 + 内容 + 时间 + 大小 + 类型 多维度组合。
-
-    支持全维度过滤和排序，适合复杂搜索需求。
-
-    Args:
-        query: 文件内容关键词（不传则仅按文件名/元数据搜索）
-        path: 搜索目录（默认 "."）
-        pattern: 文件名 glob 模式，如 "*.md"、"*MCP*"（可选）
-        use_regex: 是否将 query 视为正则（默认 False）
-        case_sensitive: 文件名/内容大小写敏感（默认 False）
-        max_results: 最大返回结果数（默认 200）
-        sort_by: 排序字段 "name" / "size" / "date"（默认 "date"）
-        sort_order: 排序方向 "asc" / "desc"（默认 "desc"）
-        max_depth: 最大搜索深度，如 3 表示最多 3 层子目录（默认不限）
-        modified_days: 最近 N 天内修改过的文件（如 7 = 最近一周）
-        min_size: 文件大小下限（字节），如 1024 = 至少 1KB
-        max_size: 文件大小上限（字节），如 1048576 = 最多 1MB
-        file_types: 文件扩展名过滤，如 ["md", "py", "txt"]
-        context_lines: 内容匹配时的上下文行数（默认 0，仅 query 时有效）
-        exclude_patterns: 排除的文件/目录模式，如 [".trash", ".git"]
-    """
-    import os, fnmatch
-    from datetime import datetime
-
-    if path is None:           path = "."
-    if max_results is None:    max_results = 200
-    if sort_by is None:        sort_by = "date"
-    if sort_order is None:     sort_order = "desc"
-    if case_sensitive is None: case_sensitive = False
-    if use_regex is None:      use_regex = False
-    if context_lines is None:  context_lines = 0
-
-    root_path = Path(path)
-    if not root_path.exists() or not root_path.is_dir():
         return f"❌ 无效目录: {path}"
 
-    # 规范化 file_types（去掉点号）
-    if file_types:
-        file_types = [t.lstrip(".").lower() for t in file_types]
+    exclude = set(exclude_patterns or [])
+    exclude.update(_AUTO_SKIP_DIRS - exclude)
 
-    base_depth = str(root_path.resolve()).count("/")
-    candidates = []  # [(path, size, mtime)]
+    has_query = query is not None and query.strip()
 
-    try:
-        for root_str, dirs, files in os.walk(str(root_path)):
-            # ── 深度控制 ──
-            if max_depth is not None:
-                current_depth = root_str.count("/") - base_depth
-                if current_depth >= max_depth:
-                    dirs.clear()
-                    continue
-
-            dirs.sort()
-
-            for fname in sorted(files):
-                fullpath = os.path.join(root_str, fname)
-
-                # ── 文件名匹配 ──
-                if pattern:
-                    if case_sensitive:
-                        if not fnmatch.fnmatch(fname, pattern):
-                            continue
-                    else:
-                        if not fnmatch.fnmatch(fname.lower(), pattern.lower()):
-                            continue
-
-                # ── 扩展名过滤 ──
-                if file_types:
-                    ext = os.path.splitext(fname)[1].lstrip(".").lower()
-                    if ext not in file_types:
-                        continue
-
-                # ── 排除模式 ──
-                if exclude_patterns:
-                    excluded = False
-                    for ep in exclude_patterns:
-                        if fnmatch.fnmatch(fname, ep) or fnmatch.fnmatch(fullpath, f"*{ep}*"):
-                            excluded = True
-                            break
-                    if excluded:
-                        continue
-
-                try:
-                    st = os.stat(fullpath)
-                except OSError:
-                    continue
-
-                # ── 时间过滤 ──
-                if modified_days is not None:
-                    age_days = (datetime.now().timestamp() - st.st_mtime) / 86400
-                    if age_days > modified_days:
-                        continue
-
-                # ── 大小过滤 ──
-                if min_size is not None and st.st_size < min_size:
-                    continue
-                if max_size is not None and st.st_size > max_size:
-                    continue
-
-                candidates.append((fullpath, st.st_size, st.st_mtime))
-
-                if len(candidates) >= max_results * 2:
-                    break
-            if len(candidates) >= max_results * 2:
-                break
-    except PermissionError:
-        pass
-
-    if not candidates:
-        return "🔍 未找到匹配任何条件的文件"
-
-    # ── 内容过滤（如果有 query） ──
-    need_content_filter = query is not None and query.strip()
-
-    if need_content_filter:
-        from android_mcp.lib.utils import async_run
-
-        # 分批次用 rg 过滤
-        matched_set = set()
-        batch_size = 200
-
-        for i in range(0, len(candidates), batch_size):
-            batch_paths = [c[0] for c in candidates[i:i+batch_size]]
-            if not batch_paths:
-                continue
-
-            cmd = ["rg", "-l"]
-            if use_regex:
-                cmd.append("-P")
-            if not case_sensitive:
-                cmd.append("-i")
-            cmd.extend(["--", query.strip()])
-            cmd.extend(batch_paths)
-
-            rg_result = await async_run(cmd, timeout=30, shell=False)
-
-            if rg_result.get('success') and rg_result['stdout'].strip():
-                for matched_path in rg_result['stdout'].strip().split('\n'):
-                    matched_path = matched_path.strip()
-                    if matched_path:
-                        matched_set.add(matched_path)
-            elif rg_result.get('returncode') == 1:
-                continue  # 这批没匹配
-            else:
-                err = rg_result.get('stderr', '').strip()[:200]
-                if 'not found' in err.lower():
-                    return "❌ 系统中未安装 ripgrep（rg），请执行: pkg install ripgrep"
-
-        candidates = [c for c in candidates if c[0] in matched_set]
-
-        if not candidates:
-            return f"🔍 未找到包含 '{query}' 的文件"
-
-    # ── 排序 ──
-    reverse = sort_order == "desc"
-    if sort_by == "size":
-        candidates.sort(key=lambda x: x[1], reverse=reverse)
-    elif sort_by == "name":
-        candidates.sort(key=lambda x: x[0].lower(), reverse=reverse)
-    else:  # date
-        candidates.sort(key=lambda x: x[2], reverse=reverse)
-
-    # ── 截取 ──
-    total = len(candidates)
-    if total > max_results:
-        candidates = candidates[:max_results]
-
-    # ── 格式化输出 ──
-    # 构建过滤条件摘要
-    filters = []
-    if pattern:       filters.append(f"文件名=「{pattern}」")
-    if query:         filters.append(f"内容=「{query}」")
-    if modified_days: filters.append(f"最近{modified_days}天")
-    if min_size:      filters.append(f"≥{_fmt_size(min_size)}")
-    if max_size:      filters.append(f"≤{_fmt_size(max_size)}")
-    if file_types:    filters.append(f"类型=「{','.join(file_types)}」")
-    if max_depth:     filters.append(f"深度≤{max_depth}")
-    filter_str = " · ".join(filters) if filters else "无条件"
-
-    header = f"🎯 复合搜索: {filter_str}"
-    if total > max_results:
-        header += f"\n📊 找到 {total} 个文件（显示前 {max_results} 个）"
+    if fuzzy and not has_query:
+        # 🔮 fzf 模糊文件名搜索
+        results, total_found = await _fuzzy_search(
+            root, pattern, exclude, max_results, max_depth, file_types,
+            modified_days, min_size, max_size, sort_by, sort_order,
+        )
+    elif not has_query:
+        # 🚀 fd 文件名搜索
+        results, total_found = await _search_by_name_fd(
+            root, pattern, exclude, max_results, max_depth, file_types,
+            modified_days, min_size, max_size, sort_by, sort_order,
+            case_sensitive, use_regex,
+        )
     else:
-        header += f"\n📊 找到 {total} 个文件"
-    header += f" 在 {path}\n"
+        # 🔬 rg 内容搜索 + 元数据过滤
+        results, total_matched = await _search_by_content_rg(
+            query.strip(), root, pattern if pattern != "*" else None,
+            exclude, max_results, file_types,
+            modified_days, min_size, max_size, sort_by, sort_order,
+            case_sensitive, use_regex, context_lines, fuzzy,
+        )
+        if not results and total_matched == 0:
+            try:
+                r = await async_run(['rg', '--version'], timeout=5, shell=False)
+                has_rg = r.get('success', False)
+            except Exception:
+                has_rg = False
+            if not has_rg:
+                return "❌ 系统中未安装 ripgrep（rg），请执行: pkg install ripgrep\n💡 或不传 query 使用纯文件名搜索"
+            return f"🔍 未找到包含 '{query}' 的文件"
+        return _format_search_results(results, str(root), pattern or "*", total_matched, max_results)
 
-    lines = [header]
-    for fpath, size, mtime in candidates:
-        mtime_str = datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M")
-        ext = os.path.splitext(fpath)[1] or " "
-        lines.append(f"  📄 {mtime_str}  {_fmt_size(size):>8}  {fpath}")
-
-    lines.append(f"\n💡 提示: 支持 query/pattern/sort_by/sort_order/max_depth/modified_days/min_size/max_size/file_types")
-    return "\n".join(lines)
+    return _format_search_results(results, str(root), pattern, total_found, max_results)
 
 
 # ══════════════════════════════════════════════
@@ -879,3 +682,283 @@ def _fmt_size(size: int) -> str:
     elif size >= 1024:
         return f"{size/1024:.1f}KB"
     return f"{size}B"
+
+
+# ══════════════════════════════════════════════
+#  File Editor — 综合文件编辑（预览/应用/撤销/显示行号）
+# ══════════════════════════════════════════════
+
+_EDIT_BACKUP_DIR = HOME / '.safe-edit-backups'
+
+_COMMENT_STYLES = {
+    '.go': '//', '.rs': '//', '.js': '//', '.ts': '//', '.jsx': '//', '.tsx': '//',
+    '.java': '//', '.kt': '//', '.swift': '//', '.c': '//', '.cpp': '//', '.h': '//',
+    '.hpp': '//', '.css': '//', '.scss': '//', '.php': '//',
+    '.py': '#', '.rb': '#', '.sh': '#', '.bash': '#', '.zsh': '#',
+    '.yaml': '#', '.yml': '#', '.toml': '#', '.ini': '#', '.cfg': '#',
+    '.lua': '--', '.sql': '--', '.hs': '--',
+    '.html': '<!--', '.xml': '<!--', '.vue': '<!--', '.svelte': '<!--',
+    '.tex': '%', '.sty': '%',
+    '.md': '<!--', '.mdx': '<!--',
+}
+
+_SIMPLE_OPS = frozenset({
+    'insert-after', 'insert-before', 'delete-lines', 'replace-line',
+    'replace-nth', 'replace-range', 'regex-subst', 'append-to',
+    'prepend-to', 'comment-out', 'uncomment', 'surround', 'move-line',
+})
+
+
+def _detect_comment(filepath: str) -> str:
+    ext = Path(filepath).suffix.lower()
+    for key, val in _COMMENT_STYLES.items():
+        if ext == key or filepath.lower().endswith(key):
+            return val
+    return '//'
+
+
+def _edit_backup(filepath: str) -> str:
+    os.makedirs(_EDIT_BACKUP_DIR, exist_ok=True)
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    basename = Path(filepath).name
+    bak = _EDIT_BACKUP_DIR / f'{basename}.{ts}.bak'
+    shutil.copy2(filepath, bak)
+    latest = _EDIT_BACKUP_DIR / f'{basename}.latest.bak'
+    if latest.is_symlink() or latest.exists():
+        latest.unlink()
+    latest.symlink_to(bak.name)
+    return str(bak)
+
+
+def _edit_undo_file(filepath: str) -> str | None:
+    basename = Path(filepath).name
+    latest = _EDIT_BACKUP_DIR / f'{basename}.latest.bak'
+    if not latest.is_symlink():
+        return None
+    target = latest.resolve() if latest.is_symlink() else latest
+    if not target.exists():
+        return None
+    shutil.copy2(str(target), filepath)
+    return str(target)
+
+
+def _edit_preview_diff(original: list, modified: list, context: int = 3) -> str:
+    diff = list(difflib.unified_diff(
+        original, modified, fromfile='original', tofile='modified', n=context,
+    ))
+    if len(diff) <= 2:
+        return '⚠ No changes'
+    return '═══ Preview Changes ═══\n' + '\n'.join(diff[2:])
+
+
+def _edit_show_lines(filepath: str, start: int = 1, end: int | None = None) -> tuple[list[str], int]:
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        lines = f.readlines()
+    total = len(lines)
+    if end is None or end > total:
+        end = total
+    start = max(1, start)
+    result = []
+    for i in range(start - 1, end):
+        result.append(f"  {i+1:>4}│ {lines[i].rstrip()}")
+    return result, total
+
+
+def _edit_apply(lines: list[str], op: str, **kw) -> list[str]:
+    """Apply an edit operation to a list of file lines. Returns modified copy."""
+    result = list(lines)
+
+    if op == 'insert-after':
+        result.insert(kw['line'], kw['content'] + '\n')
+
+    elif op == 'insert-before':
+        result.insert(kw['line'] - 1, kw['content'] + '\n')
+
+    elif op == 'delete-lines':
+        s = kw['start_line']
+        e = kw.get('end_line', s)
+        del result[s - 1:e]
+
+    elif op == 'replace-line':
+        result[kw['line'] - 1] = kw['content'] + '\n'
+
+    elif op == 'replace-nth':
+        old, new = kw['old_text'], kw['new_text']
+        n = kw.get('occurrence', 1)
+        counter = 0
+        for i in range(len(result)):
+            line = result[i]
+            occ = line.count(old)
+            if counter + occ >= n:
+                remaining = n - counter
+                result[i] = line.replace(old, new, remaining)
+                break
+            counter += occ
+
+    elif op == 'replace-range':
+        s, e = kw['start_line'], kw['end_line']
+        parts = kw['content'].split('\n')
+        result[s - 1:e] = [l + '\n' for l in parts]
+
+    elif op == 'regex-subst':
+        pat, rep = kw['pattern'], kw['replacement']
+        ln = kw.get('line')
+        if ln:
+            result[ln - 1] = re.sub(pat, rep, result[ln - 1])
+        else:
+            for i in range(len(result)):
+                result[i] = re.sub(pat, rep, result[i])
+
+    elif op == 'append-to':
+        ln = kw['line']
+        result[ln - 1] = result[ln - 1].rstrip('\n') + kw['content'] + '\n'
+
+    elif op == 'prepend-to':
+        ln = kw['line']
+        result[ln - 1] = kw['content'] + result[ln - 1]
+
+    elif op == 'comment-out':
+        s, e = kw['start_line'], kw.get('end_line', kw['start_line'])
+        c = _detect_comment(kw.get('_filepath', ''))
+        for i in range(s - 1, e):
+            if result[i].strip():
+                result[i] = f"{c} {result[i]}"
+
+    elif op == 'uncomment':
+        s, e = kw['start_line'], kw.get('end_line', kw['start_line'])
+        c = _detect_comment(kw.get('_filepath', ''))
+        c_esc = re.escape(c)
+        for i in range(s - 1, e):
+            result[i] = re.sub(r'^[ \t]*' + c_esc + r'[ \t]*', '', result[i])
+
+    elif op == 'surround':
+        ln = kw['line']
+        p, s = kw.get('prefix', ''), kw.get('suffix', '')
+        result[ln - 1] = p + result[ln - 1].rstrip() + s + '\n'
+
+    elif op == 'move-line':
+        src, dst = kw['src_line'], kw['dst_line']
+        moved = result.pop(src - 1)
+        result.insert(dst - 1 if dst <= src else dst - 1, moved)
+
+    else:
+        raise ValueError(f"Unknown operation: {op}")
+
+    return result
+
+
+@mcp.tool()
+async def file_editor(
+    file_path: str,
+    action: str = "show",
+    operation: str = "",
+    line: int | None = None,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    content: str | None = None,
+    old_text: str | None = None,
+    new_text: str | None = None,
+    occurrence: int = 1,
+    pattern: str | None = None,
+    replacement: str | None = None,
+    src_line: int | None = None,
+    dst_line: int | None = None,
+    prefix: str | None = None,
+    suffix: str | None = None,
+) -> str:
+    """🔧 智能文件编辑 — 行级插入/删除/替换/正则/预览/撤销。
+
+    所有修改前自动备份，可通过 undo 一键回滚。
+    比 edit_file 更强大：支持行级操作（而非纯文本替换）。
+
+    🎯 常用用法:
+      file_editor("demo.py")                               → 显示所有行号
+      file_editor("demo.py", "show", start_line=5, end_line=15) → 指定范围
+      file_editor("demo.py", "undo")                       → 撤销
+
+      插入: file_editor("demo.py", "apply", "insert-after", line=15, content="print('x')")
+      删除: file_editor("demo.py", "apply", "delete-lines", start_line=20, end_line=25)
+      替换: file_editor("demo.py", "apply", "regex-subst", pattern="foo", replacement="bar")
+      注释: file_editor("demo.py", "apply", "comment-out", start_line=10, end_line=12)
+      预览: file_editor("demo.py", "preview", "delete-lines", start_line=10, end_line=12)
+
+    Args:
+        file_path: 目标文件路径
+        action: show(行号) / preview(差异) / apply(确认) / undo(撤销)
+        operation: insert-after / insert-before / delete-lines / replace-line /
+            replace-nth / replace-range / regex-subst / append-to /
+            prepend-to / comment-out / uncomment / surround / move-line
+
+        行参数: line / start_line / end_line / content
+        替换参数: old_text / new_text / occurrence / pattern / replacement
+        移动参数: src_line / dst_line
+        包裹参数: prefix / suffix
+    """
+    path = Path(file_path)
+    if not path.exists():
+        return f"❌ File not found: {file_path}"
+    if not path.is_file():
+        return f"❌ Not a file: {file_path}"
+
+    # ── undo ──
+    if action == 'undo':
+        bak = _edit_undo_file(str(path))
+        return f"✓ Undone! Restored: {bak}" if bak else "⚠ No backup found"
+
+    # ── show ──
+    if action == 'show':
+        try:
+            shown, total = _edit_show_lines(str(path), start_line or 1, end_line)
+            return '\n'.join([
+                f"📄 {file_path}  ({total} lines)",
+                f"   {start_line or 1}–{end_line or total} / {total}",
+                *shown,
+            ])
+        except Exception as e:
+            return f"❌ {e}"
+
+    # ── validate ──
+    if action in ('preview', 'apply'):
+        if not operation:
+            return "❌ operation required"
+        if operation not in _SIMPLE_OPS:
+            return f"❌ Unknown op: {operation}. Valid: {', '.join(sorted(_SIMPLE_OPS))}"
+
+    # ── read ──
+    try:
+        with open(str(path), 'r', encoding='utf-8', errors='replace') as f:
+            original = f.readlines()
+    except Exception as e:
+        return f"❌ Read error: {e}"
+
+    # ── kwargs ──
+    kw = {}
+    for k, v in [('line', line), ('start_line', start_line), ('end_line', end_line),
+                 ('content', content), ('old_text', old_text), ('new_text', new_text),
+                 ('occurrence', occurrence if occurrence > 0 else None),
+                 ('pattern', pattern), ('replacement', replacement),
+                 ('src_line', src_line), ('dst_line', dst_line),
+                 ('prefix', prefix), ('suffix', suffix)]:
+        if v is not None:
+            kw[k] = v
+    kw['_filepath'] = str(path)
+
+    # ── preview ──
+    if action == 'preview':
+        try:
+            return _edit_preview_diff(original, _edit_apply(original, operation, **kw))
+        except Exception as e:
+            return f"❌ Preview failed: {e}"
+
+    # ── apply ──
+    if action == 'apply':
+        try:
+            bak = _edit_backup(str(path))
+            modified = _edit_apply(original, operation, **kw)
+            with open(str(path), 'w', encoding='utf-8') as f:
+                f.writelines(modified)
+            return f"✓ Done! Backup: {Path(bak).name}\n{_edit_preview_diff(original, modified)}"
+        except Exception as e:
+            return f"❌ Apply failed: {e}"
+
+    return f"❌ Invalid action: {action}"

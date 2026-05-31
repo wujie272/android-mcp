@@ -1,6 +1,6 @@
 # 🤖 Android MCP Server
 
-> **让 AI 直接操控你的 Android 手机** — 100+ 工具的 MCP 服务，运行在 Termux 上
+> **让 AI 直接操控你的 Android 手机** — 120+ 工具的 MCP 服务，运行在 Termux 上
 
 [![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)]()
@@ -15,7 +15,7 @@
 
 | 特性 | 说明 |
 |:-----|:------|
-| 🛠 **100+ 工具** | 屏幕操控 · 文件管理 · 应用管理 · 通信 · 传感器 · 媒体 · GitHub |
+| 🛠 **120+ 工具** | 屏幕操控 · 文件管理 · 应用管理 · 通信 · 传感器 · 媒体 · 天气 · Shizuku · GitHub |
 | 📡 **8 个 Resources** | 电池/设备/WiFi/蜂窝/存储/健康/传感器/前台 — 可直接订阅 |
 | 📝 **5 个 Prompts** | 健康巡检/取证分析/屏幕向导/崩溃调查/自动化操作 — 模板化工作流 |
 | 🚀 **分层加载** | 核心工具 0s → 常用 3s → 低频 10s，启动即用不等待 |
@@ -142,12 +142,11 @@ Resources 是**可订阅的声明式数据源**，Client 可主动读取或订�
 
 一次调用获取多维数据，告别多次轮询：
 
-```python
-device_health()      # 🔥 电池 + 存储 + 内存 + 网络 + CPU + 进程（带健康评分）
-analyze_app(pkg)     # 🔍 包信息 + 权限 + 内存 + Activity + 进程（全维度）
-quick_status()       # ⚡ 极速概览，一行一个核心指标（桌面 Widget 风格）
-screen_diagnostics() # 📺 分辨率 + 方向 + 亮度 + 前台 + UI 节点统计
-```
+| 工具 | 说明 | 数据来源数 |
+|:-----|:------|:----------|
+| `device_health()` | 🔥 **设备健康报告** — 电池 + 存储 + 内存 + WiFi + CPU + 进程，7路异步并发 | ⚡ 7 |
+| `analyze_app(pkg)` | 🔍 包信息 + 权限 + 内存 + Activity + 进程（全维度审计） | 📋 5 |
+| `screen_diagnostics()` | 📺 分辨率 + 方向 + 亮度 + 前台 + UI 节点统计 | 🖥️ 5 |
 
 ---
 
@@ -167,146 +166,167 @@ ANDROID_MCP_ALLOW_SHELL=false
 
 | 等级 | 标识 | 示例 |
 |:-----|:-----|:-----|
-| 🔒 只读 | 无副作用 | `get_battery_status()`, `quick_status()` |
 | 🔓 低风险 | 视觉操作 | `take_screenshot()`, `dump_ui()` |
 | ⚡ 中风险 | 交互操作 | `tap_screen()`, `input_text()`, `swipe_screen()` |
 | 🚨 高风险 | 数据变更 | `send_sms()`, `write_file()`, `force_stop_app()` |
 
 ---
 
-## 🛠 全部工具一览
+## 🛠 全部工具一览（100+）
 
 ### 🧠 智能定位（8 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `find_element(text)` | 按文本查找 UI 元素，返回坐标和属性 |
-| `click_by_text(text)` | 按文本查找并点击（不受布局变化影响） |
+| `find_element(text)` | 按文本/ID/类名/描述查找 UI 元素，返回坐标和属性 |
+| `click_by_text(text)` | 按文本查找并点击（不受布局变化影响，最稳健） |
 | `click_by_id(id)` | 按资源 ID 查找并点击 |
 | `click_by_class(cls)` | 按类名（Button/Switch 等）查找并点击 |
-| `wait_for_element(text)` | 等待元素出现（超时可配，适合异步加载） |
+| `wait_for_element(text)` | 等待元素出现（轮询，超时可配，适合异步加载） |
 | `get_foreground_app()` | 获取当前前台应用包名+Activity |
-| `get_ui_state(scale)` | 结构化界面状态 + 标注截图 |
-| `dump_ui_with_screenshot(scale)` | 标注所有可交互元素并截图 |
+| `get_ui_state(scale)` | 结构化界面状态 + 可选标注截图（一键到位） |
+| `dump_ui_with_screenshot(scale)` | 标注所有可交互元素的截图 + 完整元素列表 |
 
 ### 🖥️ UI 自动化（20 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `take_screenshot(scale)` | 截图（可劣化至 1/16 大小，节省 Token） |
+| `take_screenshot(scale)` | 截图（可劣化 0.25~1.0 节省 Token，全分辨率文件保留） |
 | `dump_ui(mode)` | UI 树分析（summary / full / json 三模式） |
 | `tap_screen(x, y)` | 精确点击指定坐标 |
 | `long_press(x, y, ms)` | 长按（可设时长） |
-| `swipe_screen(x1,y1 → x2,y2)` | 滑动操作 |
+| `swipe_screen(x1,y1 → x2,y2)` | 滑动操作（可调速） |
 | `input_text(text)` | 输入 ASCII 文本 |
 | `input_chinese_text(text)` | 输入中文/多语言文本（剪贴板+Paste 方案） |
-| `input_keyevent(keycode)` | 发送按键事件（Home/Back/Paste 等） |
+| `input_keyevent(keycode)` | 发送按键事件（3=Home / 4=Back / 26=Power / 66=Enter / 67=Del / 187=Recent） |
 | `go_home()` / `go_back()` | 主页 / 返回 |
 | `open_recent_apps()` | 最近应用 |
 | `screen_on()` / `screen_off()` | 亮屏 / 息屏 |
-| `rotate_device(rot)` | 旋转屏幕（0/1/2/3） |
+| `rotate_device(rot)` | 旋转屏幕（0=竖屏 / 1=横屏 / 2=反向竖屏 / 3=反向横屏） |
 | `expand_notifications()` | 下拉通知栏 |
 | `expand_settings()` | 展开快捷设置面板 |
 | `collapse_panels()` | 收起通知栏/设置面板 |
-| `screen_record(secs)` | 录屏（最长 180s） |
+| `screen_record(secs)` | 录屏（最长 180s，可显示触摸点） |
 
-### 📱 设备信息（15 个）
+### 📱 设备信息（18 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `get_battery_status()` | 电池电量/温度/充电状态/电压/电流 |
-| `get_battery_health()` | 电池健康度/循环次数/容量 |
-| `get_wifi_info()` | WiFi 连接详情（SSID/信号/速率） |
+| `get_battery_status()` | 电池电量/温度/充电状态/电压/电流/健康度 |
+| `get_battery_health()` | 深度电池健康：循环次数/容量/电压（dumpsys） |
+| `get_wifi_info()` | WiFi 连接详情（SSID/BSSID/信号/速率/频段/IP） |
 | `scan_wifi()` | 扫描附近 WiFi 热点 |
 | `wifi_qr_code()` | 生成当前 WiFi 二维码（可扫码连接） |
-| `get_telephony_info()` | 蜂窝网络信息（运营商/4G/5G/漫游） |
-| `get_telephony_cell_info()` | 基站信息（CID/LAC/信号强度） |
-| `get_location(provider)` | GPS 定位（单次/持续/最近已知） |
+| `get_telephony_info()` | 蜂窝网络信息（运营商/4G/5G/SIM 状态/IMEI） |
+| `get_telephony_cell_info()` | 基站信息（CID/LAC/信号强度/ARFCN） |
+| `get_location(provider)` | GPS 定位（gps/network/passive · 单次/持续/最近） |
 | `get_sensor_list()` | 列出所有可用传感器 |
-| `read_sensor(name)` | 读取传感器数据 |
-| `get_device_info()` | 全面设备信息 |
-| `device_health_report()` | 服务健康状态 |
+| `read_sensor(name)` | 读取传感器实时数据 |
+| `get_device_info()` | 全面设备信息（型号/Android 版本/内核/架构/运行时间） |
 | `get_screen_size()` | 屏幕分辨率 |
-| `get_screen_brightness()` | 当前亮度 |
-| `list_adb_devices()` | 列出所有 ADB 连接设备 |
+| `get_screen_brightness()` | 当前亮度（需 Shizuku/ADB） |
+| `set_screen_brightness(level)` | 设置亮度 0-255（需 Shizuku/ADB） |
+| `device_health_report()` | MCP 服务健康状态（运行时间/PID/日志大小） |
+| `list_adb_devices()` | 列出所有 ADB 连接设备（USB + WiFi，含型号） |
+| `restart_android(reason)` | 重启 android-mcp 服务（~2-3s 自愈） |
 
-### 📁 文件系统（10 个）
+### 📁 文件系统（15 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `read_file(path)` | 读取文本文件 |
-| `write_file(path, content)` | 写入文件（自动创建目录） |
+| `read_file(path)` | 读取文本文件（自动检测编码） |
+| `write_file(path, content)` | 写入文件（自动创建父目录） |
 | `edit_file(path, old, new)` | 文本替换编辑（支持 dry-run 预览） |
-| `search_files(pattern)` | 递归搜索文件（支持 glob） |
-| `directory_tree(path)` | 目录树（JSON 格式） |
+| `file_editor(path, action, ...)` | 🔧 **智能行级编辑** — 插入/删除/替换/正则/注释/撤销。预览 → 确认 → 备份 → 回滚全程保护 |
+| `search_files(query)` | 🔍 统一搜索引擎：文件名(fd) + 内容(rg) + 元数据过滤 + 模糊匹配(fzf) |
+| `file_copy(source, dest)` | 复制文件/目录（自动防覆盖加后缀） |
+| `file_move(source, dest)` | 移动/重命名文件/目录 |
+| `file_delete(path)` | 安全删除（先预览再确认，不可恢复） |
+| `file_trash(path)` | 移到回收站 `~/.trash/`（可还原） |
+| `file_symlink(source, link)` | 创建符号链接 |
+| `dir_create(path)` | 创建目录（mkdir -p 行为） |
 | `get_file_info(path)` | 文件元信息（大小/日期/权限） |
-| `list_directory(path)` | 列出目录内容（含大小） |
-| `list_directory_with_sizes(path)` | 按名称/大小排序列出 |
-| `list_allowed_directories()` | 列出可访问的目录 |
-| `execute_command(cmd)` | 执行 Shell 命令 |
+| `list_directory(path)` | 列出目录内容 |
+| `list_allowed_directories()` | 列出可访问的目录白名单 |
 
 ### 📦 应用管理（9 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `list_installed_packages()` | 列出 Termux 已装包 |
-| `list_android_packages(keyword)` | 列出 Android 应用（可过滤） |
-| `list_running_apps()` | 运行中进程 + CPU + 内存 |
-| `app_usage_stats(days)` | 应用使用统计 |
-| `open_app(package)` | 启动应用（5 级降级） |
+| `list_installed_packages()` | 列出 Termux 已装包（dpkg） |
+| `list_android_packages(keyword)` | 列出 Android 应用（可关键词过滤） |
+| `list_running_apps()` | 运行中进程 + CPU + 内存占用 |
+| `app_usage_stats(days)` | 应用使用统计（近 N 天） |
+| `open_app(package)` | 启动应用（MAIN intent → 已知 Activity → monkey，多级降级） |
 | `force_stop_app(package)` | 强制停止应用 |
-| `get_current_app()` | 当前聚焦应用 |
-| `get_foreground_app()` | 前台应用信息 |
-| `analyze_app(package)` | 🔍 深度分析（权限/内存/Activity） |
+| `get_current_app()` | 当前聚焦应用（包名+Activity） |
+| `analyze_app(package)` | 🔍 深度分析：包信息+权限+内存+Activity+进程 |
 
-### 💬 通信（11 个）
+### 💬 通信（15 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `list_sms(limit, type)` | 短信列表（收件/已发/草稿） |
-| `send_sms(number, msg)` | 发送短信 |
+| `list_sms(limit, type)` | 短信列表（inbox/sent/draft/all） |
+| `send_sms(number, msg)` | 发送短信（会产生实际费用） |
 | `list_contacts()` | 通讯录（姓名/电话/邮箱） |
-| `get_clipboard()` | 读取剪贴板 |
+| `get_clipboard()` | 读取剪贴板（Termux:API → 内存回退） |
 | `set_clipboard(text)` | 写入剪贴板 |
-| `clipboard_history(limit)` | 剪贴板历史 |
+| `clipboard_history(limit)` | 剪贴板历史记录 |
 | `clipboard_history_clear()` | 清空历史 |
-| `send_notification(...)` | 发送通知 |
-| `dismiss_notification(id)` | 移除通知 |
-| `list_notifications()` | 列出活跃通知 |
-| `show_toast(text)` | 显示 Toast |
+| `send_notification(title, msg)` | 发送通知（可振动） |
+| `dismiss_notification(id)` | 按 ID 移除通知 |
+| `list_notifications()` | 列出所有活跃通知 |
+| `show_toast(text)` | 显示 Toast 消息 |
 
-### 🔊 系统控制（8 个）
+### 🔊 系统控制（9 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `get_volume()` | 查看所有音频流音量 |
-| `set_volume(stream, level)` | 设置音量（媒体/铃声/闹钟/通知） |
+| `get_volume()` | 查看所有音频流音量（music/ring/alarm/notification/system/call） |
+| `set_volume(stream, level)` | 设置音量（0-15） |
 | `toggle_torch(on)` | 手电筒开关 |
 | `vibrate(ms, force)` | 震动（支持静音模式强制震动） |
-| `text_to_speech(text, lang)` | 文字转语音朗读 |
-| `set_screen_brightness(level)` | 设置亮度（0-255） |
+| `text_to_speech(text, lang)` | 文字转语音朗读（支持多语言） |
 | `get_fingerprint()` | 指纹认证 |
 | `open_url(url)` | 浏览器打开 URL |
 
-### 📷 媒体（8 个）
+### 📷 媒体（7 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `take_photo(camera_id)` | 拍照（前/后置） |
-| `get_camera_info()` | 相机信息 |
-| `list_photos(dir, limit)` | 列出照片文件 |
-| `read_photo(path)` | 读取照片（Base64 返回） |
-| `screen_record(secs, taps)` | 录屏（可显示触摸点） |
-| `media_player(action, path)` | 媒体播放控制 |
+| `take_photo(camera_id)` | 拍照（0=后置 / 1=前置） |
+| `get_camera_info()` | 可用相机列表及参数 |
+| `list_photos(dir, limit)` | 列出照片文件（jpg/png/gif/webp/heic） |
+| `media_player(action, path)` | 媒体播放控制（play/pause/stop/info） |
 | `share_file(path)` | 分享文件（系统分享面板） |
 | `download_file(url)` | 下载文件（系统下载管理器） |
+
+### 🌤️ 天气（6 个）
+
+| 工具 | 说明 |
+|:-----|:------|
+| `get_weather(city)` | 详细天气：温度/湿度/风速/气压 + 未来 3 天预报 |
+| `get_weather_short(city)` | 一句话快速获取当前天气（适合通知栏/快速展示） |
+| `get_weather_by_coords(lat, lng)` | 通过 GPS 经纬度精准查天气 |
+| `get_weather_by_ip(client_ip)` | 自动 IP 定位查天气（GPS → IP → 手动输入自动降级） |
+| `get_air_quality(city)` | 空气质量指数 AQI + PM2.5/PM10/O₃ 等污染物 |
 
 ### 🔌 ADB（2 个）
 
 | 工具 | 说明 |
 |:-----|:------|
-| `adb_status()` | ADB 安装和连接状态 |
-| `adb_connect(code, port)` | 无线 ADB 配对连接 |
+| `adb_status()` | ADB/Shizuku 安装和连接状态诊断 |
+| `adb_connect(pair_code, ports)` | Android 12+ 无线调试配对连接 |
+
+### 🎭 Shizuku 管理（6 个）
+
+| 工具 | 说明 |
+|:-----|:------|
+| `shizuku_status()` | 查看 Shizuku 全面状态：App 进程/守护进程/rish 可用性/小窗位置 |
+| `shizuku_hide()` | 隐藏 Shizuku 小窗（缩到右上角极小尺寸 + force-stop UI） |
+| `shizuku_show()` | 显示/启动 Shizuku App 窗口 |
+| `shizuku_resize(l,t,r,b)` | 调整小窗位置和大小（可从全屏到小点自由控制） |
+| `shizuku_restart()` | 重启 Shizuku App（卡死时恢复，守护进程不受影响） |
 
 ### 💻 GitHub（10 个）
 
@@ -319,7 +339,7 @@ ANDROID_MCP_ALLOW_SHELL=false
 | `github_list_issues(owner, repo)` | 列出 Issue |
 | `github_repo_languages(owner, repo)` | 编程语言占比 |
 | `github_list_branches(owner, repo)` | 列出分支 |
-| `github_refresh_token()` | 手动刷新 Token |
+| `github_refresh_token()` | 手动刷新 GitHub Token |
 
 ---
 
@@ -370,15 +390,17 @@ android-mcp/
     │   ├── utils.py             # 🔧 命令执行 + 日志轮转 + 安全门
     │   └── adb.py               # 🔌 ADB 连接管理
     └── tools/
-        ├── aggregation.py       # 🔥 聚合工具（device_health 等 4 个）
-        ├── ui_smart.py          # 🧠 智能元素定位（click_by_text 等）
+        ├── aggregation.py       # 🔥 聚合工具（device_health 等 3 个）
+        ├── ui_smart.py          # 🧠 智能元素定位（find/click by text 等）
         ├── ui_automation.py     # 🖥️ 截图/点击/输入/屏幕控制（20 个）
-        ├── device_info.py       # 📱 设备信息（15 个）
-        ├── file_system.py       # 📁 文件操作（10 个）
+        ├── device_info.py       # 📱 设备信息（18 个）
+        ├── file_system.py       # 📁 文件操作（15 个，含 file_editor）
         ├── app_management.py    # 📦 应用管理（9 个）
-        ├── communication.py     # 💬 通信（11 个）
-        ├── system_control.py    # 🔊 系统控制（8 个）
-        ├── media.py             # 📷 相机/录屏/媒体（8 个）
+        ├── communication.py     # 💬 通信（15 个）
+        ├── system_control.py    # 🔊 系统控制（9 个）
+        ├── media.py             # 📷 相机/媒体（7 个）
+        ├── weather.py           # 🌤️ 天气（6 个）
+        ├── shizuku.py           # 🎭 Shizuku 管理（6 个）
         ├── adb.py               # 🔌 ADB 工具（2 个）
         └── github.py            # 💻 GitHub（10 个）
 ```

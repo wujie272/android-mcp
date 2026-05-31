@@ -1,4 +1,4 @@
-"""Aggregation tools: device_health, analyze_app, quick_status, screen_diagnostics."""
+"""Aggregation tool: device_health."""
 
 import json
 import asyncio
@@ -109,13 +109,6 @@ async def device_health() -> str:
             parts = up.split('load average:')
             sections.append(f"⏱ **运行** | {parts[0].strip()}" + (f" | 负载:{parts[1].strip()}" if len(parts) > 1 else ""))
 
-    try:
-        from android_mcp.tools.ui_smart import get_foreground_app
-        fg = await get_foreground_app()
-        if fg and '前台' in fg:
-            sections.append(f"📌 **前台** | {fg.split(chr(10))[1].strip() if chr(10) in fg else fg}")
-    except: pass
-
     lines = ["━━━ 📊 设备健康总览 ━━━\n"]
     lines.extend(sections)
     if issues:
@@ -125,112 +118,3 @@ async def device_health() -> str:
                  f"{' — 状态良好' if score >= 80 else ' — 建议关注' if score >= 50 else ' — 需要处理'}")
     return "\n".join(lines)
 
-
-@mcp.tool()
-async def analyze_app(package: str) -> str:
-    """Deep app analysis: info + permissions + memory + data + activities."""
-    if not package or '.' not in package:
-        return "❌ 提供有效包名，如 'com.android.chrome'"
-
-    sections = []
-
-    def _add(title, content):
-        sections.append(f"── {title} ──\n{content}\n")
-
-    if privileged_available():
-        r = privileged_shell(
-            f"dumpsys package {package} | grep -E 'versionName|versionCode|firstInstallTime|"
-            f"lastUpdateTime|installerPackageName|uid' | head -10", timeout=10)
-        if r['success'] and r.get('stdout', '').strip():
-            _add("包信息", r['stdout'].strip())
-
-        r = privileged_shell(
-            f"dumpsys package {package} | grep -i 'permission:' | "
-            f"grep -E 'dangerous|signature|system' | head -30", timeout=10)
-        if r['success'] and r.get('stdout', '').strip():
-            perms = r['stdout'].strip()
-            flagged = [l for l in perms.split('\n') if any(x in l.lower() for x in
-                       ['location', 'camera', 'contacts', 'microphone', 'sms', 'phone', 'storage'])]
-            _add("权限", perms[:2000] + ("\n\n⚠️ 敏感权限: " + "\n".join(flagged[:10]) if flagged else ""))
-
-        r = privileged_shell(f"dumpsys meminfo {package} | head -40", timeout=10)
-        if r['success'] and r.get('stdout', '').strip():
-            _add("内存", r['stdout'].strip()[:1500])
-
-        r = privileged_shell(f"dumpsys package {package} | grep -E 'dataDir|codePath|nativeLibraryPath'", timeout=10)
-        if r['success'] and r.get('stdout', '').strip():
-            _add("路径", r['stdout'].strip())
-
-    r = privileged_shell(f"dumpsys package {package} | grep -A 5 'android.intent.action.MAIN' | head -20", timeout=10) \
-        if privileged_available() else await async_run(f"pm dump {package} 2>/dev/null | grep -A 5 'MAIN' | head -20",
-                                                        shell=True, timeout=10)
-    if r.get('stdout', '').strip():
-        _add("Activity", r['stdout'].strip())
-
-    if not sections:
-        return f"无法获取 {package} 信息。需要 Shizuku/ADB 权限。"
-
-    return f"🔍 {package} 分析:\n\n" + "\n".join(sections)
-
-
-@mcp.tool()
-async def quick_status() -> str:
-    """Desktop-widget style quick overview: battery + WiFi + storage + time."""
-    (bat_raw, wifi_raw, df_result, time_raw) = await asyncio.gather(
-        async_termux('termux-battery-status', timeout=8),
-        async_termux('termux-wifi-connectioninfo', timeout=5),
-        async_run(f'df -h {SDCARD} | tail -1', shell=True, timeout=5),
-        async_run('date "+%H:%M"', shell=True, timeout=3),
-        return_exceptions=True,
-    )
-
-    lines = []
-    if not isinstance(bat_raw, Exception):
-        try:
-            b = json.loads(bat_raw)
-            pct, temp, status = b.get('percentage', '?'), b.get('temperature', '?'), b.get('status', '?')
-            icon = "🟢" if (isinstance(pct, (int, float)) and pct > 20 and isinstance(temp, (int, float)) and temp < 40) else "🟡"
-            lines.append(f"{icon} 🔋{pct}%  {temp}°C  {status}")
-        except: pass
-
-    if not isinstance(wifi_raw, Exception):
-        try:
-            w = json.loads(wifi_raw)
-            ssid = w.get('ssid', '-')
-            sig = w.get('signal_strength', '?')
-            lines.append(f"📶 {ssid}  {sig}dBm")
-        except: pass
-
-    if not isinstance(df_result, Exception):
-        parts = df_result.get('stdout', '').strip().split()
-        if len(parts) >= 4:
-            lines.append(f"💾 剩余 {parts[3]}")
-    else:
-        lines.append("💾 ?")
-
-    if not isinstance(time_raw, Exception):
-        lines.append(f"🕐 {time_raw.get('stdout', '').strip()}")
-
-    return " | ".join(lines) or "❌ 状态获取失败"
-
-
-@mcp.tool()
-async def screen_diagnostics() -> str:
-    """Screen diagnostics: resolution, orientation, brightness, foreground app."""
-    from android_mcp.lib.utils import run as sync_run
-
-    res = sync_run('wm size', shell=True, timeout=5).get('stdout', '').strip() if privileged_available() else "?"
-    orient = sync_run('dumpsys input | grep "SurfaceOrientation" | head -1', shell=True, timeout=5).get('stdout', '').strip() \
-        if privileged_available() else "?"
-    lines = [f"📺 Screen: {res}", f"🔄 Orientation: {orient}"]
-
-    if privileged_available():
-        brightness = sync_run('settings get system screen_brightness', shell=True, timeout=5).get('stdout', '').strip()
-        if brightness:
-            lines.append(f"☀️ Brightness: {brightness}/255")
-
-    fg = sync_run("dumpsys window | grep -E 'mCurrentFocus' | head -1", shell=True, timeout=5).get('stdout', '').strip()
-    if fg:
-        lines.append(f"📌 Focus: {fg}")
-
-    return "\n".join(lines) if lines else "Screen diag: 需要 Shizuku 或 ADB"
