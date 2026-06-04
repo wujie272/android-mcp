@@ -54,7 +54,7 @@ async def execute_command(command: str = "", working_directory: str = ".", timeo
     # ── Execute ──
     try:
         timeout = min(timeout, 120)  # cap at 120 seconds
-        cwd = working_directory if working_directory and working_directory != '.' else None
+        cwd = str(Path(working_directory).expanduser()) if working_directory and working_directory != '.' else None
 
         r = await async_run(cmd_to_run, timeout=timeout, shell=True, cwd=cwd)
 

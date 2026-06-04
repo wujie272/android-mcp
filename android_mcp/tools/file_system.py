@@ -1,19 +1,16 @@
-"""File system tools: read, write, edit, search, list, execute commands."""
+"""File system tools: read, search, edit, copy, move, delete, trash, symlink."""
 
-import os
-import re
 import shutil
-import difflib
+import subprocess
 import time as _time
 from pathlib import Path
 from datetime import datetime
 
 from android_mcp.app import mcp
-from android_mcp.lib.utils import async_run, ensure_path_env
+from android_mcp.lib.utils import async_run, ensure_path_env, err
 from android_mcp.lib.constants import HOME, SDCARD, SDCARD_SHORT
 
 _TRASH_DIR = HOME / '.trash'
-
 
 # ── Read / Write ──
 
@@ -21,7 +18,7 @@ _TRASH_DIR = HOME / '.trash'
 async def read_file(file_path: str) -> str:
     """Read a text file (up to 10MB, auto-detects encoding)."""
     try:
-        path = Path(file_path)
+        path = Path(file_path).expanduser()
         if not path.exists():
             return f"Error: File not found: {file_path}"
         if path.stat().st_size > 10 * 1024 * 1024:
@@ -36,45 +33,6 @@ async def read_file(file_path: str) -> str:
     except Exception as e:
         return f"Error reading file: {e}"
 
-
-@mcp.tool()
-async def write_file(file_path: str, content: str) -> str:
-    """Write text to a file (creates parent directories)."""
-    try:
-        path = Path(file_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding='utf-8')
-        return f"Written {len(content)} chars to {file_path}"
-    except Exception as e:
-        return f"❌ 写入失败: {e}"
-
-
-# ── Edit ──
-
-@mcp.tool()
-async def edit_file(file_path: str, old_text: str, new_text: str, dry_run: bool = False) -> str:
-    """Replace first occurrence of old_text with new_text. Use dry_run=True to preview."""
-    path = Path(file_path)
-    if not path.exists():
-        return f"Error: File not found: {file_path}"
-    try:
-        content = path.read_text(encoding='utf-8')
-    except Exception as e:
-        return f"Error reading file: {e}"
-    if old_text not in content:
-        return f"Error: Text not found in {file_path}"
-    new_content = content.replace(old_text, new_text, 1)
-    if dry_run:
-        diff = difflib.unified_diff(content.splitlines(keepends=True), new_content.splitlines(keepends=True))
-        return "--- DRY RUN (NOT applied) ---\n" + "".join(diff)
-    try:
-        path.write_text(new_content, encoding='utf-8')
-        return f"✅ Edited: replaced \"{old_text[:50]}\" → \"{new_text[:50]}\""
-    except Exception as e:
-        return f"Error writing file: {e}"
-
-
-# ══════════════════════════════════════════════
 #  统一搜索引擎：fd + rg + fzf 三引擎
 # ══════════════════════════════════════════════
 
@@ -370,7 +328,7 @@ async def search_files(
         path = "."
     if pattern is None:
         pattern = "*"
-    root = Path(path)
+    root = Path(path).expanduser()
     if not root.exists() or not root.is_dir():
         return f"❌ 无效目录: {path}"
 
@@ -415,9 +373,11 @@ async def search_files(
 
 
 # ══════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════
 #  安全文件操作链
 # ══════════════════════════════════════════════
-
 
 def _add_suffix(path: Path) -> Path:
     """如果目标路径已存在，自动加日期后缀防覆盖。"""
@@ -427,7 +387,6 @@ def _add_suffix(path: Path) -> Path:
     suffix = path.suffix
     ts = _time.strftime("%Y%m%d_%H%M%S")
     return path.with_name(f"{stem}_{ts}{suffix}")
-
 
 def _preview_item(path: Path) -> str:
     """预览文件/目录信息（用于删除/回收前的展示）。"""
@@ -444,7 +403,6 @@ def _preview_item(path: Path) -> str:
         size = path.stat().st_size
         return f"📄 文件: {path} ({_fmt_size(size)})"
 
-
 _SYSTEM_PATHS = {'/', '/system', '/vendor', '/proc', '/sys', '/boot'}
 _SYSTEM_PREFIXES = {'/system/', '/vendor/', '/proc/', '/sys/', '/boot/'}
 
@@ -453,7 +411,6 @@ _ALLOWED_DATA_PATHS = [
     '/data/data/com.termux',       # Termux 用户目录
     '/data/local/tmp',             # 临时目录
 ]
-
 
 def _is_system_path(path: str) -> bool:
     """检查是否为系统关键路径（拒绝操作）。
@@ -490,7 +447,6 @@ def _is_system_path(path: str) -> bool:
     except Exception:
         return False
 
-
 @mcp.tool()
 async def file_copy(source: str, dest: str, recursive: bool = False) -> str:
     """📋 复制文件或目录。自动创建父目录。目标已存在时自动加后缀防覆盖。
@@ -500,11 +456,11 @@ async def file_copy(source: str, dest: str, recursive: bool = False) -> str:
         dest: 目标路径（已存在时自动加 _YYYYMMDD_HHMMSS 后缀）
         recursive: 复制目录时需要设为 True
     """
-    src = Path(source)
+    src = Path(source).expanduser()
     if not src.exists():
         return f"❌ 源文件不存在: {source}"
 
-    dst = Path(dest)
+    dst = Path(dest).expanduser()
     dst = _add_suffix(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -526,7 +482,6 @@ async def file_copy(source: str, dest: str, recursive: bool = False) -> str:
     except Exception as e:
         return f"❌ 复制失败: {e}"
 
-
 @mcp.tool()
 async def file_move(source: str, dest: str) -> str:
     """📦 移动/重命名文件或目录。自动创建父目录。目标已存在时自动加后缀防覆盖。
@@ -535,14 +490,14 @@ async def file_move(source: str, dest: str) -> str:
         source: 源路径
         dest: 目标路径（已存在时自动加 _YYYYMMDD_HHMMSS 后缀）
     """
-    src = Path(source)
+    src = Path(source).expanduser()
     if not src.exists():
         return f"❌ 源文件不存在: {source}"
 
-    if _is_system_path(source):
+    if _is_system_path(str(src)):
         return f"🚨 拒绝操作系统关键路径: {source}"
 
-    dst = Path(dest)
+    dst = Path(dest).expanduser()
     dst = _add_suffix(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -552,7 +507,6 @@ async def file_move(source: str, dest: str) -> str:
         return f"✅ {kind}已移动: {source} → {dst}"
     except Exception as e:
         return f"❌ 移动失败: {e}"
-
 
 @mcp.tool()
 async def file_delete(path: str, confirm: bool = False) -> str:
@@ -565,11 +519,11 @@ async def file_delete(path: str, confirm: bool = False) -> str:
         path: 要删除的文件/目录路径
         confirm: 确认删除。False（默认）仅预览；True 执行删除
     """
-    target = Path(path)
+    target = Path(path).expanduser()
     if not target.exists():
         return f"❌ 路径不存在: {path}"
 
-    if _is_system_path(path):
+    if _is_system_path(str(target)):
         return f"🚨 拒绝删除系统关键路径: {path}"
 
     if not confirm:
@@ -592,7 +546,6 @@ async def file_delete(path: str, confirm: bool = False) -> str:
     except Exception as e:
         return f"❌ 删除失败: {e}"
 
-
 @mcp.tool()
 async def dir_create(path: str) -> str:
     """📁 创建目录（mkdir -p 行为）。自动创建所有父目录，已存在不报错。
@@ -601,14 +554,13 @@ async def dir_create(path: str) -> str:
         path: 要创建的目录路径
     """
     try:
-        target = Path(path)
+        target = Path(path).expanduser()
         target.mkdir(parents=True, exist_ok=True)
         return f"✅ 目录已就绪: {target}"
     except PermissionError:
         return f"❌ 权限不足，无法创建目录: {path}"
     except Exception as e:
         return f"❌ 目录创建失败: {e}"
-
 
 @mcp.tool()
 async def file_symlink(source: str, link_name: str) -> str:
@@ -618,11 +570,11 @@ async def file_symlink(source: str, link_name: str) -> str:
         source: 源文件/目录路径
         link_name: 符号链接路径
     """
-    src = Path(source)
+    src = Path(source).expanduser()
     if not src.exists():
         return f"❌ 源文件不存在: {source}"
 
-    link = Path(link_name)
+    link = Path(link_name).expanduser()
     link = _add_suffix(link)
     link.parent.mkdir(parents=True, exist_ok=True)
 
@@ -631,7 +583,6 @@ async def file_symlink(source: str, link_name: str) -> str:
         return f"✅ 符号链接已创建: {link_name} → {source}"
     except Exception as e:
         return f"❌ 符号链接创建失败: {e}"
-
 
 @mcp.tool()
 async def file_trash(path: str, confirm: bool = False) -> str:
@@ -643,11 +594,11 @@ async def file_trash(path: str, confirm: bool = False) -> str:
         path: 要回收的文件/目录路径
         confirm: 确认回收。False（默认）预览；True 执行
     """
-    target = Path(path)
+    target = Path(path).expanduser()
     if not target.exists():
         return f"❌ 路径不存在: {path}"
 
-    if _is_system_path(path):
+    if _is_system_path(str(target)):
         return f"🚨 拒绝回收系统关键路径: {path}"
 
     if not confirm:
@@ -672,7 +623,6 @@ async def file_trash(path: str, confirm: bool = False) -> str:
     except Exception as e:
         return f"❌ 回收失败: {e}"
 
-
 def _fmt_size(size: int) -> str:
     """格式化文件大小为人类可读格式（内部工具函数）"""
     if size >= 1_073_741_824:
@@ -683,282 +633,366 @@ def _fmt_size(size: int) -> str:
         return f"{size/1024:.1f}KB"
     return f"{size}B"
 
-
-# ══════════════════════════════════════════════
-#  File Editor — 综合文件编辑（预览/应用/撤销/显示行号）
-# ══════════════════════════════════════════════
-
-_EDIT_BACKUP_DIR = HOME / '.safe-edit-backups'
-
-_COMMENT_STYLES = {
-    '.go': '//', '.rs': '//', '.js': '//', '.ts': '//', '.jsx': '//', '.tsx': '//',
-    '.java': '//', '.kt': '//', '.swift': '//', '.c': '//', '.cpp': '//', '.h': '//',
-    '.hpp': '//', '.css': '//', '.scss': '//', '.php': '//',
-    '.py': '#', '.rb': '#', '.sh': '#', '.bash': '#', '.zsh': '#',
-    '.yaml': '#', '.yml': '#', '.toml': '#', '.ini': '#', '.cfg': '#',
-    '.lua': '--', '.sql': '--', '.hs': '--',
-    '.html': '<!--', '.xml': '<!--', '.vue': '<!--', '.svelte': '<!--',
-    '.tex': '%', '.sty': '%',
-    '.md': '<!--', '.mdx': '<!--',
-}
-
-_SIMPLE_OPS = frozenset({
-    'insert-after', 'insert-before', 'delete-lines', 'replace-line',
-    'replace-nth', 'replace-range', 'regex-subst', 'append-to',
-    'prepend-to', 'comment-out', 'uncomment', 'surround', 'move-line',
-})
+# ── cache original content for diff ──
+_file_cache: dict[str, str] = {}
 
 
-def _detect_comment(filepath: str) -> str:
-    ext = Path(filepath).suffix.lower()
-    for key, val in _COMMENT_STYLES.items():
-        if ext == key or filepath.lower().endswith(key):
-            return val
-    return '//'
+def _esc_pat(s: str) -> str:
+    """Escape string for sed s/// pattern side."""
+    for c in '\\/&*.+?^${}()|[]':
+        s = s.replace(c, '\\' + c)
+    return s
 
 
-def _edit_backup(filepath: str) -> str:
-    os.makedirs(_EDIT_BACKUP_DIR, exist_ok=True)
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    basename = Path(filepath).name
-    bak = _EDIT_BACKUP_DIR / f'{basename}.{ts}.bak'
-    shutil.copy2(filepath, bak)
-    latest = _EDIT_BACKUP_DIR / f'{basename}.latest.bak'
-    if latest.is_symlink() or latest.exists():
-        latest.unlink()
-    latest.symlink_to(bak.name)
-    return str(bak)
+def _esc_rep(s: str) -> str:
+    """Escape string for sed s/// replacement side."""
+    s = s.replace('\\', '\\\\')
+    s = s.replace('/', '\\/')
+    s = s.replace('&', '\\&')
+    return s
 
 
-def _edit_undo_file(filepath: str) -> str | None:
-    basename = Path(filepath).name
-    latest = _EDIT_BACKUP_DIR / f'{basename}.latest.bak'
-    if not latest.is_symlink():
-        return None
-    target = latest.resolve() if latest.is_symlink() else latest
-    if not target.exists():
-        return None
-    shutil.copy2(str(target), filepath)
-    return str(target)
+def _esc_ln(s: str) -> str:
+    """Escape string for sed line commands (conservative superset)."""
+    for c in '\\/&*.+?^${}()|[]':
+        s = s.replace(c, '\\' + c)
+    return s
 
 
-def _edit_preview_diff(original: list, modified: list, context: int = 3) -> str:
-    diff = list(difflib.unified_diff(
-        original, modified, fromfile='original', tofile='modified', n=context,
-    ))
-    if len(diff) <= 2:
-        return '⚠ No changes'
-    return '═══ Preview Changes ═══\n' + '\n'.join(diff[2:])
+def _mk_fuzzy(s: str) -> str:
+    """Build [[:space:]]\\+ separated fuzzy pattern from words."""
+    return '[[:space:]]\\+'.join(_esc_pat(w) for w in s.split())
 
 
-def _edit_show_lines(filepath: str, start: int = 1, end: int | None = None) -> tuple[list[str], int]:
-    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-        lines = f.readlines()
-    total = len(lines)
-    if end is None or end > total:
-        end = total
-    start = max(1, start)
-    result = []
-    for i in range(start - 1, end):
-        result.append(f"  {i+1:>4}│ {lines[i].rstrip()}")
-    return result, total
+def _sed_run(expr: str, file: str, extended: bool = False) -> tuple[bool, str]:
+    """Run sed -i with expression. Returns (ok, error_msg)."""
+    cmd = ['sed', '-i']
+    if extended:
+        cmd.append('-E')
+    cmd.append(expr)
+    cmd.append(file)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return False, (r.stderr or r.stdout or '').strip()
+        return True, ''
+    except subprocess.TimeoutExpired:
+        return False, 'timeout'
+    except Exception as e:
+        return False, str(e)
 
 
-def _edit_apply(lines: list[str], op: str, **kw) -> list[str]:
-    """Apply an edit operation to a list of file lines. Returns modified copy."""
-    result = list(lines)
+def _diff(fa: str, fb: str) -> str:
+    """diff -u via shell."""
+    try:
+        r = subprocess.run(['diff', '-u', fa, fb], capture_output=True, text=True, timeout=10)
+        out = r.stdout.strip()
+        return out if out else '(no diff)'
+    except Exception as e:
+        return f'(diff failed: {e})'
 
-    if op == 'insert-after':
-        result.insert(kw['line'], kw['content'] + '\n')
 
-    elif op == 'insert-before':
-        result.insert(kw['line'] - 1, kw['content'] + '\n')
+def _snapshot(file: str) -> str:
+    cache = _file_cache.get(file)
+    if cache is not None:
+        return cache
+    try:
+        c = Path(file).read_text()
+        _file_cache[file] = c
+        return c
+    except Exception:
+        return ''
 
-    elif op == 'delete-lines':
-        s = kw['start_line']
-        e = kw.get('end_line', s)
-        del result[s - 1:e]
 
-    elif op == 'replace-line':
-        result[kw['line'] - 1] = kw['content'] + '\n'
-
-    elif op == 'replace-nth':
-        old, new = kw['old_text'], kw['new_text']
-        n = kw.get('occurrence', 1)
-        counter = 0
-        for i in range(len(result)):
-            line = result[i]
-            occ = line.count(old)
-            if counter + occ >= n:
-                remaining = n - counter
-                result[i] = line.replace(old, new, remaining)
-                break
-            counter += occ
-
-    elif op == 'replace-range':
-        s, e = kw['start_line'], kw['end_line']
-        parts = kw['content'].split('\n')
-        result[s - 1:e] = [l + '\n' for l in parts]
-
-    elif op == 'regex-subst':
-        pat, rep = kw['pattern'], kw['replacement']
-        ln = kw.get('line')
-        if ln:
-            result[ln - 1] = re.sub(pat, rep, result[ln - 1])
-        else:
-            for i in range(len(result)):
-                result[i] = re.sub(pat, rep, result[i])
-
-    elif op == 'append-to':
-        ln = kw['line']
-        result[ln - 1] = result[ln - 1].rstrip('\n') + kw['content'] + '\n'
-
-    elif op == 'prepend-to':
-        ln = kw['line']
-        result[ln - 1] = kw['content'] + result[ln - 1]
-
-    elif op == 'comment-out':
-        s, e = kw['start_line'], kw.get('end_line', kw['start_line'])
-        c = _detect_comment(kw.get('_filepath', ''))
-        for i in range(s - 1, e):
-            if result[i].strip():
-                result[i] = f"{c} {result[i]}"
-
-    elif op == 'uncomment':
-        s, e = kw['start_line'], kw.get('end_line', kw['start_line'])
-        c = _detect_comment(kw.get('_filepath', ''))
-        c_esc = re.escape(c)
-        for i in range(s - 1, e):
-            result[i] = re.sub(r'^[ \t]*' + c_esc + r'[ \t]*', '', result[i])
-
-    elif op == 'surround':
-        ln = kw['line']
-        p, s = kw.get('prefix', ''), kw.get('suffix', '')
-        result[ln - 1] = p + result[ln - 1].rstrip() + s + '\n'
-
-    elif op == 'move-line':
-        src, dst = kw['src_line'], kw['dst_line']
-        moved = result.pop(src - 1)
-        result.insert(dst - 1 if dst <= src else dst - 1, moved)
-
-    else:
-        raise ValueError(f"Unknown operation: {op}")
-
-    return result
+def _changed(file: str) -> bool:
+    """Check if file changed since snapshot."""
+    try:
+        cur = Path(file).read_text()
+        org = _file_cache.get(file, cur)
+        return cur != org
+    except Exception:
+        return False
 
 
 @mcp.tool()
-async def file_editor(
-    file_path: str,
-    action: str = "show",
-    operation: str = "",
-    line: int | None = None,
-    start_line: int | None = None,
-    end_line: int | None = None,
-    content: str | None = None,
-    old_text: str | None = None,
-    new_text: str | None = None,
-    occurrence: int = 1,
-    pattern: str | None = None,
-    replacement: str | None = None,
-    src_line: int | None = None,
-    dst_line: int | None = None,
-    prefix: str | None = None,
-    suffix: str | None = None,
-) -> str:
-    """🔧 智能文件编辑 — 行级插入/删除/替换/正则/预览/撤销。
+async def edit_file(file_path: str, operations: list[dict]) -> str:
+    """Edit a file using shell tools (sed). Supports cascading fuzzy fallback.
 
-    所有修改前自动备份，可通过 undo 一键回滚。
-    比 edit_file 更强大：支持行级操作（而非纯文本替换）。
+    Operation dicts:
+      type: "replace" | "replace_line" | "insert_before" | "insert_after" | "delete"
 
-    🎯 常用用法:
-      file_editor("demo.py")                               → 显示所有行号
-      file_editor("demo.py", "show", start_line=5, end_line=15) → 指定范围
-      file_editor("demo.py", "undo")                       → 撤销
+    "replace":
+      {"type":"replace","old":"...","new":"...","global":true, "use_regex":false, "fuzzy":false}
+      - use_regex=true: old → regex (sed -E). ⚠️ sed ERE doesn't support \d, use [0-9]
+      - fuzzy=true: auto normalise whitespace differences
+      - Auto cascading: exact → whitespace-fuzzy → case-insensitive → both (unless use_regex)
 
-      插入: file_editor("demo.py", "apply", "insert-after", line=15, content="print('x')")
-      删除: file_editor("demo.py", "apply", "delete-lines", start_line=20, end_line=25)
-      替换: file_editor("demo.py", "apply", "regex-subst", pattern="foo", replacement="bar")
-      注释: file_editor("demo.py", "apply", "comment-out", start_line=10, end_line=12)
-      预览: file_editor("demo.py", "preview", "delete-lines", start_line=10, end_line=12)
+      - occurrence=N: target the N-th matching line (1-based). Prevents "wrong first match" errors.
+      - context_above/below: anchor match by verifying surrounding line content.
+      - dry_run=true: preview matched lines without modifying the file.
+      - max_matches=N: safety cap — refuse to modify if more than N lines match.
+      - case_sensitive: explicit control (default True in precise mode).
+    "replace_line":   {"type":"replace_line", "line":5, "text":"new"}
+    "insert_before":  {"type":"insert_before","line":3,"text":"..."}
+    "insert_after":   {"type":"insert_after","line":3,"text":"..."}
+    "delete":         {"type":"delete","line":5} or {"type":"delete","start":5,"end":8}
 
     Args:
-        file_path: 目标文件路径
-        action: show(行号) / preview(差异) / apply(确认) / undo(撤销)
-        operation: insert-after / insert-before / delete-lines / replace-line /
-            replace-nth / replace-range / regex-subst / append-to /
-            prepend-to / comment-out / uncomment / surround / move-line
-
-        行参数: line / start_line / end_line / content
-        替换参数: old_text / new_text / occurrence / pattern / replacement
-        移动参数: src_line / dst_line
-        包裹参数: prefix / suffix
+        file_path: File to edit
+        operations: List of operation dicts
     """
-    path = Path(file_path)
+    path = Path(file_path).expanduser()
+    path_str = str(path)
     if not path.exists():
-        return f"❌ File not found: {file_path}"
-    if not path.is_file():
-        return f"❌ Not a file: {file_path}"
+        return err("File not found", file_path)
 
-    # ── undo ──
-    if action == 'undo':
-        bak = _edit_undo_file(str(path))
-        return f"✓ Undone! Restored: {bak}" if bak else "⚠ No backup found"
-
-    # ── show ──
-    if action == 'show':
-        try:
-            shown, total = _edit_show_lines(str(path), start_line or 1, end_line)
-            return '\n'.join([
-                f"📄 {file_path}  ({total} lines)",
-                f"   {start_line or 1}–{end_line or total} / {total}",
-                *shown,
-            ])
-        except Exception as e:
-            return f"❌ {e}"
-
-    # ── validate ──
-    if action in ('preview', 'apply'):
-        if not operation:
-            return "❌ operation required"
-        if operation not in _SIMPLE_OPS:
-            return f"❌ Unknown op: {operation}. Valid: {', '.join(sorted(_SIMPLE_OPS))}"
-
-    # ── read ──
+    # snapshot original
+    _file_cache.pop(path_str, None)
+    before = _snapshot(path_str)
+    bak = f"{path_str}.bak"
     try:
-        with open(str(path), 'r', encoding='utf-8', errors='replace') as f:
-            original = f.readlines()
-    except Exception as e:
-        return f"❌ Read error: {e}"
+        Path(bak).write_text(before)
+    except Exception:
+        pass
 
-    # ── kwargs ──
-    kw = {}
-    for k, v in [('line', line), ('start_line', start_line), ('end_line', end_line),
-                 ('content', content), ('old_text', old_text), ('new_text', new_text),
-                 ('occurrence', occurrence if occurrence > 0 else None),
-                 ('pattern', pattern), ('replacement', replacement),
-                 ('src_line', src_line), ('dst_line', dst_line),
-                 ('prefix', prefix), ('suffix', suffix)]:
-        if v is not None:
-            kw[k] = v
-    kw['_filepath'] = str(path)
+    report_parts = [f"📄 {file_path}"]
 
-    # ── preview ──
-    if action == 'preview':
+    for i, op in enumerate(operations):
+        op_type = op.get('type', '')
+        report_parts.append(f"\n[{i+1}] {op_type}")
+
         try:
-            return _edit_preview_diff(original, _edit_apply(original, operation, **kw))
-        except Exception as e:
-            return f"❌ Preview failed: {e}"
+            if op_type == 'replace':
+                old = op.get('old', '')
+                new = op.get('new', '')
+                is_global = op.get('global', False)
+                use_regex = op.get('use_regex', False)
+                fuzzy = op.get('fuzzy', False)
+                # ── New params (backward compatible) ──
+                occurrence = op.get('occurrence')
+                context_above = op.get('context_above')
+                context_below = op.get('context_below')
+                dry_run = op.get('dry_run', False)
+                max_matches = op.get('max_matches')
+                case_sensitive = op.get('case_sensitive')
 
-    # ── apply ──
-    if action == 'apply':
-        try:
-            bak = _edit_backup(str(path))
-            modified = _edit_apply(original, operation, **kw)
-            with open(str(path), 'w', encoding='utf-8') as f:
-                f.writelines(modified)
-            return f"✓ Done! Backup: {Path(bak).name}\n{_edit_preview_diff(original, modified)}"
-        except Exception as e:
-            return f"❌ Apply failed: {e}"
+                if not old:
+                    report_parts.append("  ⚠️  missing 'old'")
+                    continue
 
-    return f"❌ Invalid action: {action}"
+                g = 'g' if is_global else ''
+
+                # ── Precise line-based mode: occurrence / context / dry_run / max_matches ──
+                use_precise = (occurrence is not None or context_above is not None or
+                               context_below is not None or dry_run or max_matches is not None)
+
+                if use_precise:
+                    cs = case_sensitive if case_sensitive is not None else True
+                    grep_cmd = ['grep', '-n']
+                    if use_regex:
+                        grep_cmd.append('-E')
+                    else:
+                        grep_cmd.append('-F')
+                    if not cs:
+                        grep_cmd.append('-i')
+                    grep_cmd.extend(['--', old, path_str])
+
+                    try:
+                        grep_r = subprocess.run(grep_cmd, capture_output=True, text=True, timeout=10)
+                    except Exception as e:
+                        report_parts.append(f"  ⚠️  search failed: {e}")
+                        continue
+
+                    if grep_r.returncode != 0:
+                        report_parts.append("  ⚠️  text not found")
+                        continue
+
+                    # Parse matches: list of (line_number, line_content)
+                    matches = []
+                    for line in grep_r.stdout.strip().split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        idx = line.find(':')
+                        if idx > 0 and line[:idx].isdigit():
+                            matches.append((int(line[:idx]), line[idx+1:]))
+
+                    # Filter by occurrence
+                    if occurrence is not None:
+                        if occurrence < 1 or occurrence > len(matches):
+                            report_parts.append(f"  ⚠️  occurrence {occurrence} out of range (total {len(matches)})")
+                            continue
+                        matches = [matches[occurrence - 1]]
+
+                    # Filter by context_above
+                    if context_above is not None:
+                        filtered = []
+                        for ln, ct in matches:
+                            if ln <= 1:
+                                continue
+                            try:
+                                r = subprocess.run(['sed', '-n', f'{ln-1}p', path_str],
+                                                  capture_output=True, text=True, timeout=5)
+                                if context_above in r.stdout:
+                                    filtered.append((ln, ct))
+                            except Exception:
+                                pass
+                        matches = filtered
+                        if not matches:
+                            report_parts.append(f"  ⚠️  no match with context_above='{context_above}'")
+                            continue
+
+                    # Filter by context_below
+                    if context_below is not None:
+                        filtered = []
+                        total_lines = 0
+                        try:
+                            r = subprocess.run(['wc', '-l', path_str], capture_output=True, text=True, timeout=5)
+                            total_lines = int(r.stdout.strip().split()[0])
+                        except Exception:
+                            pass
+                        for ln, ct in matches:
+                            if total_lines > 0 and ln >= total_lines:
+                                continue
+                            try:
+                                r = subprocess.run(['sed', '-n', f'{ln+1}p', path_str],
+                                                  capture_output=True, text=True, timeout=5)
+                                if context_below in r.stdout:
+                                    filtered.append((ln, ct))
+                            except Exception:
+                                pass
+                        matches = filtered
+                        if not matches:
+                            report_parts.append(f"  ⚠️  no match with context_below='{context_below}'")
+                            continue
+
+                    # Check max_matches safety limit
+                    if max_matches is not None and len(matches) > max_matches:
+                        report_parts.append(f"  ⚠️  {len(matches)} matches exceed max_matches={max_matches}, refusing to modify")
+                        continue
+
+                    # dry_run: just report
+                    if dry_run:
+                        for ln, ct in matches:
+                            report_parts.append(f"  📋 line {ln}: {ct.rstrip()}")
+                        report_parts.append(f"  ℹ️  {len(matches)} match(es), dry_run=True, file unchanged")
+                        continue
+
+                    # Apply replacement on matched lines
+                    escaped_new = _esc_rep(new)
+                    ok_count = 0
+                    for ln, ct in matches:
+                        if use_regex:
+                            expr = f"{ln}s/{old}/{escaped_new}/{g}"
+                            ok, msg = _sed_run(expr, path_str, extended=True)
+                        else:
+                            expr = f"{ln}s/{_esc_pat(old)}/{escaped_new}/{g}"
+                            ok, msg = _sed_run(expr, path_str)
+                        if ok:
+                            ok_count += 1
+                        else:
+                            report_parts.append(f"  ⚠️  line {ln}: {msg}")
+
+                    line_refs = ', '.join(str(ln) for ln, _ in matches)
+                    report_parts.append(f"  ✅ replaced on line(s): {line_refs}")
+                    continue
+
+                # ── use_regex (without precise mode, original logic) ──
+                if use_regex:
+                    expr = f"s/{old}/{_esc_rep(new)}/{g}"
+                    ok, msg = _sed_run(expr, path_str, extended=True)
+                    report_parts.append(f"  regex: {'done' if ok else msg}")
+                    continue
+
+                # ── Backward-compatible cascade ──
+                snapshot = _snapshot(path_str)
+
+                if fuzzy:
+                    strategies = [
+                        (lambda o: _mk_fuzzy(o) + '/' + _esc_rep(new) + '/', 'fuzzy'),
+                        (lambda o: _esc_pat(o) + '/' + _esc_rep(new) + '/' + g + 'I', 'fuzzy case'),
+                        (lambda o: _mk_fuzzy(o) + '/' + _esc_rep(new) + '/' + g + 'I', 'fuzzy both'),
+                    ]
+                    for maker, label in strategies:
+                        pat = maker(old)
+                        ok, _ = _sed_run(f"s/{pat}", path_str)
+                        if ok and _changed(path_str):
+                            report_parts.append(f"  ({label}) done")
+                            break
+                    else:
+                        report_parts.append("  ⚠️  text not found")
+                        continue
+                    continue
+
+                # auto cascade: exact → fuzzy ws → fuzzy ci → fuzzy both
+                strategies = [
+                    (lambda o: _esc_pat(o) + '/' + _esc_rep(new) + '/' + g, 'done'),
+                    (lambda o: _mk_fuzzy(o) + '/' + _esc_rep(new) + '/' + g, '(fuzzy whitespace) done'),
+                    (lambda o: _esc_pat(o) + '/' + _esc_rep(new) + '/' + g + 'I', '(fuzzy case-insensitive) done'),
+                    (lambda o: _mk_fuzzy(o) + '/' + _esc_rep(new) + '/' + g + 'I', '(fuzzy both) done'),
+                ]
+                for maker, label in strategies:
+                    pat = maker(old)
+                    ok, _ = _sed_run(f"s/{pat}", path_str)
+                    if ok and _changed(path_str):
+                        report_parts.append(f"  {label}")
+                        break
+                else:
+                    report_parts.append("  ⚠️  text not found")
+
+            elif op_type == 'replace_line':
+                ln = op.get('line', 0)
+                text = op.get('text', '')
+                te = _esc_ln(text)
+                ok, msg = _sed_run(f"{ln}s/.*/{te}/", path_str)
+                report_parts.append(f"  line {ln}" if ok else f"  {msg}")
+
+            elif op_type == 'insert_before':
+                ln = op.get('line', 0)
+                text = op.get('text', '')
+                # Handle multi-line inserts for sed i\ command
+                # sed i\ expects: N i\n line1\n line2\n lastline
+                lines = text.split('\n')
+                for i in range(len(lines)):
+                    lines[i] = _esc_ln(lines[i])
+                    if i < len(lines) - 1:
+                        lines[i] += '\\'
+                te = '\n'.join(lines)
+                ok, msg = _sed_run(f"{ln}i\\\n{te}", path_str)
+                report_parts.append(f"  before {ln}" if ok else f"  {msg}")
+
+            elif op_type == 'insert_after':
+                ln = op.get('line', 0)
+                text = op.get('text', '')
+                # Handle multi-line inserts for sed a\ command
+                lines = text.split('\n')
+                for i in range(len(lines)):
+                    lines[i] = _esc_ln(lines[i])
+                    if i < len(lines) - 1:
+                        lines[i] += '\\'
+                te = '\n'.join(lines)
+                ok, msg = _sed_run(f"{ln}a\\\n{te}", path_str)
+                report_parts.append(f"  after {ln}" if ok else f"  {msg}")
+
+            elif op_type == 'delete':
+                s = op.get('start', op.get('line', 0))
+                e = op.get('end', s)
+                ok, msg = _sed_run(f"{s},{e}d", path_str)
+                report_parts.append(f"  deleted {s}-{e}" if ok else f"  {msg}")
+
+            else:
+                report_parts.append(f"  ⚠️  unknown type '{op_type}'")
+
+        except Exception as e:
+            report_parts.append(f"  ⚠️  error: {e}")
+
+    if not _changed(path_str):
+        report_parts.append("\nℹ️  No changes (content identical)")
+        Path(bak).unlink(missing_ok=True)
+        _file_cache.pop(path_str, None)
+        return '\n'.join(report_parts)
+
+    report_parts.append(f"\n📦 backup: {bak}")
+    report_parts.append(f"\n📋 diff:\n{_diff(bak, path_str)}")
+    _file_cache.pop(path_str, None)
+    return '\n'.join(report_parts)

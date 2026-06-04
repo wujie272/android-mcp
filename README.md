@@ -166,7 +166,6 @@ ANDROID_MCP_ALLOW_SHELL=false
 
 | 等级 | 标识 | 示例 |
 |:-----|:-----|:-----|
-| 🔓 低风险 | 视觉操作 | `take_screenshot()`, `dump_ui()` |
 | ⚡ 中风险 | 交互操作 | `tap_screen()`, `input_text()`, `swipe_screen()` |
 | 🚨 高风险 | 数据变更 | `send_sms()`, `write_file()`, `force_stop_app()` |
 
@@ -191,7 +190,6 @@ ANDROID_MCP_ALLOW_SHELL=false
 
 | 工具 | 说明 |
 |:-----|:------|
-| `take_screenshot(scale)` | 截图（可劣化 0.25~1.0 节省 Token，全分辨率文件保留） |
 | `dump_ui(mode)` | UI 树分析（summary / full / json 三模式） |
 | `tap_screen(x, y)` | 精确点击指定坐标 |
 | `long_press(x, y, ms)` | 长按（可设时长） |
@@ -301,14 +299,13 @@ ANDROID_MCP_ALLOW_SHELL=false
 | `share_file(path)` | 分享文件（系统分享面板） |
 | `download_file(url)` | 下载文件（系统下载管理器） |
 
-### 🌤️ 天气（6 个）
+### 🌤️ 天气（5 个）
 
 | 工具 | 说明 |
 |:-----|:------|
 | `get_weather(city)` | 详细天气：温度/湿度/风速/气压 + 未来 3 天预报 |
-| `get_weather_short(city)` | 一句话快速获取当前天气（适合通知栏/快速展示） |
+| `get_weather_short(city)` | 一句话快速获取当前天气概况（支持城市名或坐标） |
 | `get_weather_by_coords(lat, lng)` | 通过 GPS 经纬度精准查天气 |
-| `get_weather_by_ip(client_ip)` | 自动 IP 定位查天气（GPS → IP → 手动输入自动降级） |
 | `get_air_quality(city)` | 空气质量指数 AQI + PM2.5/PM10/O₃ 等污染物 |
 
 ### 🔌 ADB（2 个）
@@ -399,7 +396,7 @@ android-mcp/
         ├── communication.py     # 💬 通信（15 个）
         ├── system_control.py    # 🔊 系统控制（9 个）
         ├── media.py             # 📷 相机/媒体（7 个）
-        ├── weather.py           # 🌤️ 天气（6 个）
+        ├── weather.py           # 🌤️ 天气（5 个）
         ├── shizuku.py           # 🎭 Shizuku 管理（6 个）
         ├── adb.py               # 🔌 ADB 工具（2 个）
         └── github.py            # 💻 GitHub（10 个）

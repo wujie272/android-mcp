@@ -1,42 +1,28 @@
-"""🌤️ Weather MCP Tools — Optimized v2.0
+"""🌤️ Weather MCP Tools — v2.1 (定位去除版)
 
 Integrated directly into Android MCP (no external MCP endpoint needed).
-Uses wttr.in, ip-api.com, ipinfo.io, and WAQI APIs.
+Uses wttr.in and WAQI APIs.
 
-🌟 Optimization highlights (v2.0):
-  - Shared httpx connection pool (HTTP keep-alive, fewer TCP handshakes)
-  - In-memory TTL cache for weather & location (reduces duplicate API calls)
-  - Concurrent GPS + IP racing (returns whichever is faster, cuts tail latency)
-  - AQI direct city query (skips wttr.in coordinate lookup when possible)
-  - get_weather_short now supports coordinates + auto-detect city/coords
-  - Auto-retry on transient 5xx failures
-  - Better error messages with troubleshooting hints
+Tools: get_weather, get_weather_short, get_weather_by_coords, get_air_quality
 """
 
 import os
-import json
 import time
 import asyncio
 import logging
-from functools import wraps
 
 import httpx
 from android_mcp.app import mcp
-from android_mcp.lib.utils import async_termux, async_run
 
 logger = logging.getLogger("android-mcp.weather")
 
 # ── API endpoints ──
 WTTR_BASE = "https://wttr.in"
-IPAPI_BASE = "https://ip-api.com/json"
-IPINFO_BASE = "https://ipinfo.io/json"
 WAQI_BASE = "https://api.waqi.info/feed"
 USER_AGENT = "android-mcp/0.5.0"
 
-# ── Cache TTLs ──
-CACHE_TTL_WEATHER = 300      # 5 min for weather data
-CACHE_TTL_LOCATION_GPS = 30  # 30s for GPS (position can change)
-CACHE_TTL_LOCATION_IP = 300  # 5 min for IP location (stable)
+# ── Cache TTL ──
+CACHE_TTL_WEATHER = 300  # 5 min for weather data
 
 # ── Retry policy ──
 MAX_RETRIES = 1  # retry once on 5xx
@@ -47,13 +33,7 @@ MAX_RETRIES = 1  # retry once on 5xx
 # ══════════════════════════════════════════════
 
 class _SharedClient:
-    """Module-level shared httpx client with connection pooling.
-
-    Benefits of a single shared client:
-    - HTTP/1.1 keep-alive → fewer TCP handshakes
-    - Connection pool limits → prevents resource exhaustion
-    - DNS cache → reduces DNS lookup latency
-    """
+    """Module-level shared httpx client with connection pooling."""
 
     _client: httpx.AsyncClient | None = None
     _lock = asyncio.Lock()
@@ -62,7 +42,7 @@ class _SharedClient:
     async def get(cls, timeout: float = 15.0) -> httpx.AsyncClient:
         if cls._client is None:
             async with cls._lock:
-                if cls._client is None:  # double-checked locking
+                if cls._client is None:
                     limits = httpx.Limits(
                         max_keepalive_connections=8,
                         max_connections=16,
@@ -115,13 +95,12 @@ class _TTLCache:
         self._store.clear()
 
 
-# ── Global caches ──
+# ── Global cache ──
 _weather_cache = _TTLCache(default_ttl=CACHE_TTL_WEATHER)
-_location_cache = _TTLCache(default_ttl=CACHE_TTL_LOCATION_IP)
 
 
 # ══════════════════════════════════════════════
-#  🔄 Auto-retry decorator (for transient failures)
+#  🔄 Auto-retry (for transient failures)
 # ══════════════════════════════════════════════
 
 async def _fetch_with_retry(client: httpx.AsyncClient, url: str, params: dict | None = None) -> httpx.Response | None:
@@ -132,7 +111,6 @@ async def _fetch_with_retry(client: httpx.AsyncClient, url: str, params: dict | 
             resp = await client.get(url, params=params)
             if resp.is_success:
                 return resp
-            # Only retry on server errors (5xx)
             if 500 <= resp.status_code < 600 and attempt < MAX_RETRIES:
                 logger.debug("wttr.in 5xx (%d), retrying...", resp.status_code)
                 await asyncio.sleep(0.5 * (attempt + 1))
@@ -145,143 +123,6 @@ async def _fetch_with_retry(client: httpx.AsyncClient, url: str, params: dict | 
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
     logger.warning("Request failed after %d attempts: %s", MAX_RETRIES + 1, last_error)
-    return None
-
-
-# ══════════════════════════════════════════════
-#  🎯 定位引擎 (多源并发回退链)
-# ══════════════════════════════════════════════
-
-async def _locate_by_gps() -> dict | None:
-    """🥇 GPS: 通过 termux-location 获取精确坐标."""
-    # Check cache first (GPS position changes slowly between queries)
-    cached = _location_cache.get("gps:last")
-    if cached:
-        return cached
-
-    try:
-        raw = await async_termux("termux-location", args=["-p", "gps"], timeout=8)
-        if raw.startswith("Error"):
-            logger.info("termux-location GPS failed: %s", raw)
-            raw = await async_termux("termux-location", args=["-p", "network"], timeout=6)
-            if raw.startswith("Error"):
-                logger.info("termux-location network also failed: %s", raw)
-                return None
-        data = json.loads(raw) if isinstance(raw, str) else raw
-        lat = data.get("latitude")
-        lon = data.get("longitude")
-        if lat is not None and lon is not None:
-            result = {
-                "source": "gps",
-                "lat": lat,
-                "lon": lon,
-                "accuracy": data.get("accuracy"),
-                "altitude": data.get("altitude"),
-            }
-            _location_cache.set("gps:last", result, ttl=CACHE_TTL_LOCATION_GPS)
-            return result
-    except Exception as e:
-        logger.debug("GPS location failed: %s", e)
-    return None
-
-
-async def _locate_by_ip(client_ip: str = "") -> dict | None:
-    """🥈 IP定位: ip-api.com → ipinfo.io fallback."""
-    cache_key = f"ip:{client_ip or 'self'}"
-    cached = _location_cache.get(cache_key)
-    if cached:
-        return cached
-
-    client = await _SharedClient.get()
-
-    # Try ip-api.com first
-    try:
-        url = f"{IPAPI_BASE}/{client_ip}" if client_ip else IPAPI_BASE
-        params = {"lang": "zh-CN", "fields": "status,city,lat,lon,regionName,country,query"}
-        resp = await client.get(url, params=params)
-        if resp.is_success:
-            data = resp.json()
-            if data.get("status") == "success":
-                result = {
-                    "source": "ip-api",
-                    "city": data.get("city", ""),
-                    "lat": data.get("lat"),
-                    "lon": data.get("lon"),
-                    "region": data.get("regionName", ""),
-                    "country": data.get("country", ""),
-                    "ip": data.get("query", ""),
-                }
-                _location_cache.set(cache_key, result)
-                return result
-    except Exception as e:
-        logger.debug("ip-api failed: %s", e)
-
-    # Fallback: ipinfo.io
-    try:
-        resp = await client.get(IPINFO_BASE)
-        if resp.is_success:
-            data = resp.json()
-            loc_str = data.get("loc", "")
-            if loc_str and "," in loc_str:
-                lat_str, lon_str = loc_str.split(",", 1)
-                result = {
-                    "source": "ipinfo",
-                    "city": data.get("city", ""),
-                    "lat": float(lat_str),
-                    "lon": float(lon_str),
-                    "region": data.get("region", ""),
-                    "country": data.get("country", ""),
-                    "ip": data.get("ip", ""),
-                }
-                _location_cache.set(cache_key, result)
-                return result
-    except Exception as e:
-        logger.debug("ipinfo fallback also failed: %s", e)
-
-    return None
-
-
-async def _resolve_location(client_ip: str = "") -> dict | None:
-    """🎯 定位回退链: 并发 GPS + IP → 取最先返回的有效结果.
-
-    🚀 v2.0 改进: GPS 和 IP 定位同时进行，谁快用谁。
-    在 GPS 信号弱的区域（室内、高楼间），IP 定位往往更快返回。
-
-    Returns dict with keys: source, city?, lat, lon, ...
-    """
-    # 🥇 并发启动 GPS 和 IP 定位
-    gps_task = asyncio.create_task(_locate_by_gps())
-
-    # 如果给了 client_ip，先查指定 IP，否则查本机
-    ip_task = asyncio.create_task(_locate_by_ip(client_ip) if client_ip else _locate_by_ip())
-
-    # 等待第一个完成的任务
-    done, pending = await asyncio.wait(
-        [gps_task, ip_task],
-        return_when=asyncio.FIRST_COMPLETED,
-        timeout=10,
-    )
-
-    # 检查已完成的任务
-    for task in done:
-        result = task.result()
-        if result:
-            # 取消另一个还在跑的任务
-            for p in pending:
-                p.cancel()
-            logger.info("📍 定位成功 (%s): %.4f, %.4f", result["source"], result["lat"], result["lon"])
-            return result
-
-    # 如果第一个完成的没成功（极少见），等另一个
-    for task in pending:
-        try:
-            result = await task
-            if result:
-                logger.info("📍 定位成功 (%s): %.4f, %.4f", result["source"], result["lat"], result["lon"])
-                return result
-        except asyncio.CancelledError:
-            pass
-
     return None
 
 
@@ -353,7 +194,7 @@ async def _weather_short_by_city(city: str) -> str:
         )
         if resp and resp.is_success:
             text = resp.text.strip()
-            _weather_cache.set(cache_key, text, ttl=180)  # shorter TTL for short format
+            _weather_cache.set(cache_key, text, ttl=180)
             return text
         return "获取失败"
     except Exception as e:
@@ -488,16 +329,11 @@ def _format_aqi(result: dict) -> str:
 
 
 # ══════════════════════════════════════════════
-#  🎯 AQI 获取（优化版: 直接城市名查询，跳过 wttr.in）
+#  🎯 AQI 获取
 # ══════════════════════════════════════════════
 
 async def _fetch_aqi(city: str) -> dict:
-    """获取 AQI 数据.
-
-    🚀 v2.0 优化:
-    - 优先用城市名直查 WAQI（无需先调 wttr.in 拿坐标）
-    - 只有城市名直查失败时才回退到坐标查询
-    """
+    """获取 AQI 数据."""
     token = os.environ.get("WAQI_TOKEN") or ""
     if not token:
         return {
@@ -508,7 +344,7 @@ async def _fetch_aqi(city: str) -> dict:
 
     client = await _SharedClient.get()
 
-    # 🥇 方案一：直接用城市名查 WAQI (更快，少一次外部请求)
+    # 🥇 方案一：直接用城市名查 WAQI
     try:
         resp = await client.get(
             f"{WAQI_BASE}/{httpx.utils.quote(city)}/",
@@ -570,29 +406,17 @@ async def get_weather(city: str) -> str:
 async def get_weather_short(city: str = "", latitude: float | None = None, longitude: float | None = None) -> str:
     """一句话快速获取当前天气概况（简洁版，适合快速查看或通知栏展示）。
 
-    支持城市名或经纬度查询，至少提供 city 或 (latitude + longitude) 其中之一。
+    至少提供 city 或 (latitude + longitude) 其中之一。
 
     参数:
-        city: 城市名（可选），如 '北京' / 'Tokyo'
-        latitude: 纬度（可选，需配合 longitude 使用）
-        longitude: 经度（可选，需配合 latitude 使用）
+        city: 城市名，如 '北京' / 'Tokyo'
+        latitude: 纬度（需配合 longitude 使用）
+        longitude: 经度（需配合 latitude 使用）
 
     示例:
         get_weather_short(city='北京')
         get_weather_short(latitude=39.9042, longitude=116.4074)
-        get_weather_short()  # 自动定位
     """
-    # 自动定位模式 (无参数)
-    if not city and latitude is None:
-        loc = await _resolve_location()
-        if loc:
-            lat, lon = loc.get("lat"), loc.get("lon")
-            if lat is not None and lon is not None:
-                text = await _weather_short_by_coords(lat, lon)
-                if text and text != "获取失败":
-                    return f"📍 {loc.get('city', '当前位置')}: {text}"
-        return "❌ 无法自动定位。请使用 get_weather_short(city='城市名')"
-
     # 坐标模式
     if latitude is not None and longitude is not None:
         text = await _weather_short_by_coords(latitude, longitude)
@@ -621,53 +445,6 @@ async def get_weather_by_coords(latitude: float, longitude: float) -> str:
 
 
 @mcp.tool()
-async def get_weather_by_ip(client_ip: str = "") -> str:
-    """根据客户端 IP 自动定位城市并获取天气，无需手动输入城市名。
-
-    🔄 自动回退链: GPS定位 → IP定位(传入IP) → IP定位(本机) → 引导手动输入
-
-    参数 client_ip 可选，留空则自动获取本机定位。
-    """
-    loc = await _resolve_location(client_ip)
-    if not loc:
-        return (
-            "❌ 无法自动定位。原因可能是:\n"
-            "  1. GPS 未开启或 termux-location 未安装\n"
-            "  2. 网络环境限制 IP 定位\n"
-            "  3. 需要位置权限 (请运行: termux-setup-storage)\n\n"
-            "💡 请使用 get_weather(city='城市名') 手动查询"
-        )
-
-    lat, lon = loc.get("lat"), loc.get("lon")
-    city = loc.get("city", "")
-
-    data = None
-    loc_hint = ""
-
-    if lat is not None and lon is not None:
-        data = await _weather_by_coords(lat, lon)
-        source_label = {"gps": "GPS定位", "ip-api": "IP定位(ip-api)", "ipinfo": "IP定位(ipinfo)"}
-        src = source_label.get(loc.get("source", ""), loc.get("source", "定位"))
-        loc_hint = f"{src} → {city or f'{lat:.4f}, {lon:.4f}'}"
-
-    if not data and city:
-        data = await _weather_by_city(city)
-        loc_hint = f"IP定位: {city}"
-
-    if not data:
-        city_name = loc.get('city', '未知')
-        region = loc.get('region', '')
-        country = loc.get('country', '')
-        loc_suffix = f" ({region}, {country})" if country else ""
-        return (
-            f"📍 检测到位置: **{city_name}**{loc_suffix}\n"
-            f"❌ 但无法获取该位置的天气数据"
-        )
-
-    return _format_weather(data, city or f"{lat},{lon}", location_hint=loc_hint)
-
-
-@mcp.tool()
 async def get_air_quality(city: str) -> str:
     """获取指定城市的空气质量指数（AQI）和污染物数据（PM2.5、PM10、O₃等）。
 
@@ -681,11 +458,10 @@ async def get_air_quality(city: str) -> str:
 
 
 # ══════════════════════════════════════════════
-#  🧹 清理（服务关闭时释放连接池）
+#  🧹 清理
 # ══════════════════════════════════════════════
 
 async def cleanup():
     """释放共享 httpx 连接池. 在服务退出时调用."""
     await _SharedClient.close()
     _weather_cache.clear()
-    _location_cache.clear()

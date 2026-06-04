@@ -280,7 +280,7 @@ async def get_ui_state(scale: float = 0.5, include_screenshot: bool = True) -> s
 
     if include_screenshot:
         try:
-            from android_mcp.tools.ui_automation import take_screenshot
+            from android_mcp.tools.ui_automation import _take_screenshot as take_screenshot
             ss = await take_screenshot(scale=scale)
             if 'data:image/png;base64,' in ss:
                 b64 = ss.split('data:image/png;base64,')[-1]

@@ -76,6 +76,30 @@ rotate_log() {
     ls -1t "${LOG_FILE}".*.bak 2>/dev/null | tail -n +6 | xargs -r rm -f
 }
 
+# ── 加载配置文件 ──
+load_config() {
+    local config_file="$BASE_DIR/config.json"
+    if [[ ! -f "$config_file" ]]; then
+        return 0  # 没有配置文件不报错
+    fi
+
+    # 用 python3 解析 JSON，比 jq/sed 更可靠
+    local cfg
+    cfg=$("$PYTHON" -c "
+import json, sys
+with open('$config_file') as f:
+    cfg = json.load(f)
+for k, v in cfg.items():
+    if v:
+        print(f'{k}={v}')
+" 2>/dev/null) || return 0
+
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || -z "$value" ]] && continue
+        export "${key^^}"="$value"
+        inf "配置: ${key^^}=${value:0:8}..."
+    done <<< "$cfg"
+}
 # ── 命令: start ──
 cmd_start() {
     # 已在运行？

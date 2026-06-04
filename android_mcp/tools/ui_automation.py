@@ -41,8 +41,7 @@ def _resize_for_b64(image_path: Path, scale: float, max_dim: int = 1080):
 
 # ── Screenshot ──
 
-@mcp.tool()
-async def take_screenshot(output_path: str = "", scale: float = 1.0) -> str:
+async def _take_screenshot(output_path: str = "", scale: float = 1.0) -> str:
     """Take screenshot. Returns base64 image data.
 
     scale (0.25~1.0): lower = fewer tokens. max_dim=1080 protects large screens.

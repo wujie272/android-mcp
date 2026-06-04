@@ -7,7 +7,8 @@ mcp = FastMCP("termux-control")
 import android_mcp.tools.device_info
 import android_mcp.tools.ui_automation
 import android_mcp.tools.ui_smart
-import android_mcp.tools.github
+# import android_mcp.tools.github  # 已迁移到独立 GitHub MCP (Go) :8082
+import android_mcp.tools.file_system  # 📝 read, search, edit, copy, move, delete, trash
 import android_mcp.tools.aggregation
 import android_mcp.tools.file_system
 import android_mcp.tools.app_management
