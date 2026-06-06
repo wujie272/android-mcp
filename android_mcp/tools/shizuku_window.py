@@ -198,3 +198,127 @@ async def shizuku_restart() -> str:
     if r.get('success'):
         return "✅ Shizuku App 已重启"
     return f"⚠️ 重启失败：{r.get('stderr', r.get('error', '未知错误'))}"
+
+
+# ══════════════════════════════════════════════════════════════
+#  Shizuku Watchdog — Termux 被杀能自启
+# ══════════════════════════════════════════════════════════════
+
+WATCHDOG_BASE = "$HOME/mcp-servers/android-mcp/watchdog"
+WATCHDOG_SCRIPT = WATCHDOG_BASE + ".sh"
+WATCHDOG_PID_FILE = WATCHDOG_BASE + ".pid"
+WATCHDOG_LOG = WATCHDOG_BASE + ".log"
+
+
+def _get_watchdog_pid() -> str | None:
+    """获取 Watchdog 进程 PID，避免 pgrep 自匹配。"""
+    pid = None
+    # 从 PID 文件读
+    r = run("cat " + WATCHDOG_PID_FILE + " 2>/dev/null", timeout=5, shell=True)
+    candidate = r.get('stdout', '').strip()
+    if candidate and candidate.isdigit():
+        r2 = run("kill -0 " + candidate + " 2>/dev/null && echo alive", timeout=5, shell=True)
+        if r2.get('stdout', '').strip() == 'alive':
+            pid = candidate
+    if pid:
+        return pid
+    # ps aux 兜底（[w]atchdog 避免自匹配，awk 取 PID）
+    r = run("ps aux 2>/dev/null | grep -E '[w]atchdog\\.sh' | awk '{print $2}' | head -1", timeout=5, shell=True)
+    return r.get('stdout', '').strip() or None
+
+
+@mcp.tool()
+async def watchdog_start() -> str:
+    """🛡️ 启动 Shizuku Watchdog 守护（Termux 被杀后自动拉起 MCP）。
+
+    Watchdog 通过 rish (Shizuku) 运行，独立于 Termux 进程。
+    即使 Termux 被系统 OOM 杀掉，Watchdog 仍能存活并自动恢复。
+    """
+    existing = _get_watchdog_pid()
+    if existing:
+        return "⚠️ Watchdog 已在运行 (PID: " + existing + ")"
+
+    r = run("test -f " + WATCHDOG_SCRIPT + " && echo exists", timeout=5, shell=True)
+    if r.get('stdout', '').strip() != 'exists':
+        return "❌ watchdog.sh 不存在，请先部署脚本"
+
+    if not _rish_available():
+        return "❌ rish 不可用，Watchdog 需要 Shizuku 环境"
+
+    r = run("nohup bash " + WATCHDOG_SCRIPT + " > " + WATCHDOG_LOG + " 2>&1 &", timeout=10, shell=True)
+    if not r.get('success', False):
+        return "❌ 启动失败: " + r.get('stderr', r.get('error', '未知错误'))
+
+    import asyncio
+    await asyncio.sleep(2)
+    pid = _get_watchdog_pid()
+    if pid:
+        return (
+            "✅ Watchdog 已启动 (PID: " + pid + ")\n"
+            "  · 每 30s 检查 MCP 状态\n"
+            "  · MCP 挂了自动拉起 Termux + start.sh\n"
+            "  · Termux 被 OOM 杀后仍能恢复\n"
+            "  · 日志: " + WATCHDOG_LOG
+        )
+    return "⚠️ Watchdog 似乎启动失败，请查看日志: " + WATCHDOG_LOG
+
+
+@mcp.tool()
+async def watchdog_stop() -> str:
+    """⏹️ 停止 Shizuku Watchdog 守护。"""
+    pid = _get_watchdog_pid()
+    if not pid:
+        return "⚠️ Watchdog 未运行"
+
+    run("kill " + pid + " 2>/dev/null", timeout=5, shell=True)
+    import asyncio
+    await asyncio.sleep(1)
+
+    r = run("kill -0 " + pid + " 2>/dev/null && echo alive", timeout=5, shell=True)
+    if r.get('stdout', '').strip() == 'alive':
+        run("kill -9 " + pid + " 2>/dev/null", timeout=5, shell=True)
+        await asyncio.sleep(0.5)
+
+    run("rm -f " + WATCHDOG_PID_FILE, timeout=5, shell=True)
+    return "✅ Watchdog 已停止 (PID: " + pid + ")"
+
+
+@mcp.tool()
+async def watchdog_status() -> str:
+    """📊 查看 Shizuku Watchdog 运行状态。"""
+    lines = []
+
+    pid = _get_watchdog_pid()
+    if pid:
+        lines.append("🟢 Watchdog 运行中 (PID: " + pid + ")")
+
+        r = run("ps -o etimes= -p " + pid + " 2>/dev/null", timeout=5, shell=True)
+        etimes = r.get('stdout', '').strip()
+        if etimes and etimes.isdigit():
+            hours = int(etimes) // 3600
+            mins = (int(etimes) % 3600) // 60
+            lines.append("  运行: " + str(hours) + "h " + str(mins) + "m")
+
+        r = run("tail -3 " + WATCHDOG_LOG + " 2>/dev/null", timeout=5, shell=True)
+        log_tail = r.get('stdout', '').strip()
+        if log_tail:
+            lines.append("  最近日志:")
+            for line in log_tail.split('\n'):
+                lines.append("    " + line)
+    else:
+        lines.append("🔴 Watchdog 未运行")
+
+    r = run("pgrep -f 'http_termux_server' | head -1", timeout=5, shell=True)
+    mcp_pid = r.get('stdout', '').strip()
+    lines.append("  MCP 服务: " + ("🟢 运行中 (PID: " + mcp_pid + ")" if mcp_pid else "🔴 未运行"))
+
+    r = run("test -f $HOME/.mcp_autostart && echo exists", timeout=5, shell=True)
+    if r.get('stdout', '').strip() == 'exists':
+        lines.append("  📝 autostart 标记: 存在（待拉起）")
+
+    lines.append("  rish: " + ("✅ 可用" if _rish_available() else "❌ 不可用"))
+
+    r = run("grep -q 'mcp_autostart' ~/.bashrc && echo installed", timeout=5, shell=True)
+    lines.append("  .bashrc 钩子: " + ("✅ 已安装" if r.get('stdout','').strip() else "❌ 未安装"))
+
+    return "\n".join(lines)
