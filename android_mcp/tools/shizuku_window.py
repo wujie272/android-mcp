@@ -4,6 +4,8 @@ Shizuku 的 shizuku_server 是独立守护进程（oom_adj=-17），
 App UI 窗口关闭后不影响 rish 调用。本模块用于管理 App 窗口。
 """
 
+import re
+
 from android_mcp.app import mcp
 from android_mcp.lib.utils import privileged_shell, run
 
@@ -12,13 +14,28 @@ SHIZUKU_ACTIVITY = "moe.shizuku.privileged.api/moe.shizuku.manager.MainActivity"
 
 
 def _get_task_id() -> str | None:
-    """通过 dumpsys 查找 Shizuku 的 taskId。"""
-    r = privileged_shell(f"dumpsys window windows | grep -E 'moe.shizuku.*taskId' | head -1")
-    if not r.get('success'):
+    """通过 dumpsys activity activities 查找 Shizuku 的 taskId。
+
+    兼容 Android 15 (taskId=296) 和 Android 16 (#2502) 两种格式。
+    """
+    r = privileged_shell(
+        "dumpsys activity activities 2>/dev/null | grep 'moe.shizuku.privileged.api' | head -1"
+    )
+    if not r.get('success') or not r.get('stdout', '').strip():
+        # Fallback: 尝试旧版 dumpsys window 路径
+        r = privileged_shell(
+            "dumpsys window windows 2>/dev/null | grep 'moe.shizuku' | head -1"
+        )
+    out = r.get('stdout', '').strip()
+    if not out:
         return None
-    # 提取 taskId=296
-    import re
-    m = re.search(r'taskId=(\d+)', r.get('stdout', ''))
+
+    # Android 16:  Task{xxx #2502 ...}
+    m = re.search(r'#(\d+)', out)
+    if m:
+        return m.group(1)
+    # Android 15:  taskId=296
+    m = re.search(r'taskId=(\d+)', out)
     return m.group(1) if m else None
 
 
@@ -26,6 +43,12 @@ def _is_shizuku_running() -> bool:
     """检查 Shizuku App 进程是否在运行。"""
     r = privileged_shell(f"pgrep -f '{SHIZUKU_PKG}' | head -1")
     return bool(r.get('stdout', '').strip())
+
+
+def _rish_available() -> bool:
+    """检查 rish 是否可用（直接在 Termux 下调 rish，避免递归）。"""
+    r = run("~/rish -c 'echo ok' 2>&1", timeout=10, shell=True)
+    return r.get('success', False) and 'ok' in r.get('stdout', '')
 
 
 @mcp.tool()
@@ -119,7 +142,6 @@ async def shizuku_status() -> str:
         · 小窗位置（如果可见）
     """
     lines = []
-    import re
 
     # 1. App 进程
     r = privileged_shell(f"pgrep -f '{SHIZUKU_PKG}' | head -1")
@@ -139,21 +161,26 @@ async def shizuku_status() -> str:
     else:
         lines.append("❌ shizuku_server 守护进程: 未运行 — 请在 Shizuku App 中启动")
 
-    # 3. rish 可用性
-    r = privileged_shell("~/rish -c 'echo ok' 2>&1")
-    if r.get('success') and 'ok' in r.get('stdout', ''):
+    # 3. rish 可用性（直接用 Termux 调 rish，不走 privileged_shell 递归）
+    if _rish_available():
         lines.append("✅ rish 可用")
     else:
         lines.append("❌ rish 不可用")
 
-    # 4. 小窗位置
-    r = privileged_shell("dumpsys window windows | grep -A1 'c50ea99 moe.shizuku' | grep frame")
-    frame_match = re.search(r'frame=\[Rect\((\d+), (\d+) - (\d+), (\d+)\)\]', r.get('stdout', ''))
-    if frame_match:
-        l, t, r2, b = frame_match.groups()
-        w = int(r2) - int(l)
-        h = int(b) - int(t)
-        lines.append(f"🪟 小窗位置: ({l},{t}) → ({r2},{b}) 尺寸 {w}×{h}px")
+    # 4. 小窗位置（取 activity 中的 visible/freeform 信息）
+    r = privileged_shell(
+        "dumpsys activity activities 2>/dev/null | grep 'moe.shizuku' | head -3"
+    )
+    task_line = r.get('stdout', '').strip()
+    if task_line:
+        # 提取 mode、visible 等信息
+        mode_m = re.search(r'mode=(\w+)', task_line)
+        vis_m = re.search(r'visible=(\w+)', task_line)
+        mode = mode_m.group(1) if mode_m else '?'
+        vis = vis_m.group(1) if vis_m else '?'
+        wtask_m = re.search(r'#(\d+)', task_line)
+        tid = wtask_m.group(1) if wtask_m else '?'
+        lines.append(f"🪟 task #{tid} | mode={mode} | visible={vis}")
     else:
         lines.append("🪟 小窗: 不可见（已隐藏或未启动）")
 
