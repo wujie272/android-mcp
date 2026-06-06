@@ -6,3 +6,14 @@ dist/
 build/
 .eggs/
 logs/
+
+# Runtime
+run.pid
+run.log
+
+# Backups
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db

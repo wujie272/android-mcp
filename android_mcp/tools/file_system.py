@@ -637,6 +637,20 @@ def _fmt_size(size: int) -> str:
 _file_cache: dict[str, str] = {}
 
 
+def _detect_encoding(path: Path) -> str:
+    """Detect text file encoding by trying common encodings."""
+    raw = path.read_bytes()
+    if raw[:3] == b'\xef\xbb\xbf':
+        return 'utf-8-sig'
+    for enc in ['utf-8', 'gbk', 'gb2312', 'shift-jis', 'latin-1']:
+        try:
+            raw.decode(enc)
+            return enc
+        except UnicodeDecodeError:
+            continue
+    return 'utf-8'
+
+
 def _esc_pat(s: str) -> str:
     """Escape string for sed s/// pattern side."""
     for c in '\\/&*.+?^${}()|[]':
@@ -682,14 +696,16 @@ def _sed_run(expr: str, file: str, extended: bool = False) -> tuple[bool, str]:
         return False, str(e)
 
 
-def _diff(fa: str, fb: str) -> str:
-    """diff -u via shell."""
-    try:
-        r = subprocess.run(['diff', '-u', fa, fb], capture_output=True, text=True, timeout=10)
-        out = r.stdout.strip()
-        return out if out else '(no diff)'
-    except Exception as e:
-        return f'(diff failed: {e})'
+def _python_diff(before: str, after: str) -> str:
+    """diff using Python difflib (no subprocess)."""
+    import difflib as _dl
+    diff = ''.join(_dl.unified_diff(
+        before.splitlines(keepends=True),
+        after.splitlines(keepends=True),
+        fromfile='before', tofile='after', lineterm=''
+    ))
+    return diff if diff else '(identical)'
+
 
 
 def _snapshot(file: str) -> str:
@@ -716,22 +732,22 @@ def _changed(file: str) -> bool:
 
 @mcp.tool()
 async def edit_file(file_path: str, operations: list[dict]) -> str:
-    """Edit a file using shell tools (sed). Supports cascading fuzzy fallback.
+    """Edit a file using Python native operations (no sed).
+    Supports all operation types: replace, replace_line, insert_before, insert_after, delete.
+    Full Unicode support — Chinese, multi-byte, special characters all handled correctly.
 
     Operation dicts:
       type: "replace" | "replace_line" | "insert_before" | "insert_after" | "delete"
 
     "replace":
       {"type":"replace","old":"...","new":"...","global":true, "use_regex":false, "fuzzy":false}
-      - use_regex=true: old → regex (sed -E). ⚠️ sed ERE doesn't support \d, use [0-9]
+      - use_regex=true: old → regex pattern (Python re.sub, full Unicode support)
       - fuzzy=true: auto normalise whitespace differences
-      - Auto cascading: exact → whitespace-fuzzy → case-insensitive → both (unless use_regex)
-
-      - occurrence=N: target the N-th matching line (1-based). Prevents "wrong first match" errors.
-      - context_above/below: anchor match by verifying surrounding line content.
-      - dry_run=true: preview matched lines without modifying the file.
-      - max_matches=N: safety cap — refuse to modify if more than N lines match.
-      - case_sensitive: explicit control (default True in precise mode).
+      - occurrence=N: target the N-th matching line (1-based)
+      - context_above/below: anchor match by verifying surrounding line content
+      - dry_run=true: preview matched lines without modifying the file
+      - max_matches=N: safety cap — refuse to modify if more than N lines match
+      - case_sensitive: explicit control (default: case-sensitive in line mode)
     "replace_line":   {"type":"replace_line", "line":5, "text":"new"}
     "insert_before":  {"type":"insert_before","line":3,"text":"..."}
     "insert_after":   {"type":"insert_after","line":3,"text":"..."}
@@ -741,21 +757,28 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
         file_path: File to edit
         operations: List of operation dicts
     """
+    import difflib as _difflib
+    import re as _re
+
     path = Path(file_path).expanduser()
-    path_str = str(path)
     if not path.exists():
         return err("File not found", file_path)
 
-    # snapshot original
-    _file_cache.pop(path_str, None)
-    before = _snapshot(path_str)
-    bak = f"{path_str}.bak"
+    # ── 1. Read with encoding detection ──
+    raw = path.read_bytes()
+    encoding = _detect_encoding(path)
+    content = raw.decode(encoding)
+    before = content
+    is_modified = False
+
+    # ── 2. Backup ──
+    bak_path = Path(str(path) + '.bak')
     try:
-        Path(bak).write_text(before)
+        bak_path.write_bytes(raw)
     except Exception:
         pass
 
-    report_parts = [f"📄 {file_path}"]
+    report_parts = [f"\U0001f4c4 {file_path}  \u7f16\u7801: {encoding}"]
 
     for i, op in enumerate(operations):
         op_type = op.get('type', '')
@@ -768,231 +791,184 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
                 is_global = op.get('global', False)
                 use_regex = op.get('use_regex', False)
                 fuzzy = op.get('fuzzy', False)
-                # ── New params (backward compatible) ──
                 occurrence = op.get('occurrence')
                 context_above = op.get('context_above')
                 context_below = op.get('context_below')
                 dry_run = op.get('dry_run', False)
                 max_matches = op.get('max_matches')
-                case_sensitive = op.get('case_sensitive')
+                cs = op.get('case_sensitive')
 
                 if not old:
-                    report_parts.append("  ⚠️  missing 'old'")
+                    report_parts.append("  \u26a0\ufe0f  missing 'old'")
                     continue
 
-                g = 'g' if is_global else ''
+                use_line_mode = (occurrence is not None or context_above is not None or
+                                 context_below is not None or dry_run or max_matches is not None)
 
-                # ── Precise line-based mode: occurrence / context / dry_run / max_matches ──
-                use_precise = (occurrence is not None or context_above is not None or
-                               context_below is not None or dry_run or max_matches is not None)
+                if use_line_mode:
+                    lines = content.splitlines(keepends=True)
+                    matched = []
 
-                if use_precise:
-                    cs = case_sensitive if case_sensitive is not None else True
-                    grep_cmd = ['grep', '-n']
-                    if use_regex:
-                        grep_cmd.append('-E')
-                    else:
-                        grep_cmd.append('-F')
-                    if not cs:
-                        grep_cmd.append('-i')
-                    grep_cmd.extend(['--', old, path_str])
-
-                    try:
-                        grep_r = subprocess.run(grep_cmd, capture_output=True, text=True, timeout=10)
-                    except Exception as e:
-                        report_parts.append(f"  ⚠️  search failed: {e}")
-                        continue
-
-                    if grep_r.returncode != 0:
-                        report_parts.append("  ⚠️  text not found")
-                        continue
-
-                    # Parse matches: list of (line_number, line_content)
-                    matches = []
-                    for line in grep_r.stdout.strip().split('\n'):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        idx = line.find(':')
-                        if idx > 0 and line[:idx].isdigit():
-                            matches.append((int(line[:idx]), line[idx+1:]))
-
-                    # Filter by occurrence
-                    if occurrence is not None:
-                        if occurrence < 1 or occurrence > len(matches):
-                            report_parts.append(f"  ⚠️  occurrence {occurrence} out of range (total {len(matches)})")
-                            continue
-                        matches = [matches[occurrence - 1]]
-
-                    # Filter by context_above
-                    if context_above is not None:
-                        filtered = []
-                        for ln, ct in matches:
-                            if ln <= 1:
-                                continue
-                            try:
-                                r = subprocess.run(['sed', '-n', f'{ln-1}p', path_str],
-                                                  capture_output=True, text=True, timeout=5)
-                                if context_above in r.stdout:
-                                    filtered.append((ln, ct))
-                            except Exception:
-                                pass
-                        matches = filtered
-                        if not matches:
-                            report_parts.append(f"  ⚠️  no match with context_above='{context_above}'")
-                            continue
-
-                    # Filter by context_below
-                    if context_below is not None:
-                        filtered = []
-                        total_lines = 0
-                        try:
-                            r = subprocess.run(['wc', '-l', path_str], capture_output=True, text=True, timeout=5)
-                            total_lines = int(r.stdout.strip().split()[0])
-                        except Exception:
-                            pass
-                        for ln, ct in matches:
-                            if total_lines > 0 and ln >= total_lines:
-                                continue
-                            try:
-                                r = subprocess.run(['sed', '-n', f'{ln+1}p', path_str],
-                                                  capture_output=True, text=True, timeout=5)
-                                if context_below in r.stdout:
-                                    filtered.append((ln, ct))
-                            except Exception:
-                                pass
-                        matches = filtered
-                        if not matches:
-                            report_parts.append(f"  ⚠️  no match with context_below='{context_below}'")
-                            continue
-
-                    # Check max_matches safety limit
-                    if max_matches is not None and len(matches) > max_matches:
-                        report_parts.append(f"  ⚠️  {len(matches)} matches exceed max_matches={max_matches}, refusing to modify")
-                        continue
-
-                    # dry_run: just report
-                    if dry_run:
-                        for ln, ct in matches:
-                            report_parts.append(f"  📋 line {ln}: {ct.rstrip()}")
-                        report_parts.append(f"  ℹ️  {len(matches)} match(es), dry_run=True, file unchanged")
-                        continue
-
-                    # Apply replacement on matched lines
-                    escaped_new = _esc_rep(new)
-                    ok_count = 0
-                    for ln, ct in matches:
+                    for idx, line in enumerate(lines):
                         if use_regex:
-                            expr = f"{ln}s/{old}/{escaped_new}/{g}"
-                            ok, msg = _sed_run(expr, path_str, extended=True)
+                            flags = _re.IGNORECASE if (cs is False) else 0
+                            if _re.search(old, line, flags):
+                                matched.append(idx)
                         else:
-                            expr = f"{ln}s/{_esc_pat(old)}/{escaped_new}/{g}"
-                            ok, msg = _sed_run(expr, path_str)
-                        if ok:
-                            ok_count += 1
-                        else:
-                            report_parts.append(f"  ⚠️  line {ln}: {msg}")
+                            if cs is False:
+                                if old.lower() in line.lower():
+                                    matched.append(idx)
+                            else:
+                                if old in line:
+                                    matched.append(idx)
 
-                    line_refs = ', '.join(str(ln) for ln, _ in matches)
-                    report_parts.append(f"  ✅ replaced on line(s): {line_refs}")
-                    continue
+                    if context_above is not None:
+                        matched = [idx for idx in matched
+                                   if idx > 0 and context_above in lines[idx - 1]]
 
-                # ── use_regex (without precise mode, original logic) ──
-                if use_regex:
-                    expr = f"s/{old}/{_esc_rep(new)}/{g}"
-                    ok, msg = _sed_run(expr, path_str, extended=True)
-                    report_parts.append(f"  regex: {'done' if ok else msg}")
-                    continue
+                    if context_below is not None:
+                        matched = [idx for idx in matched
+                                   if idx < len(lines) - 1 and context_below in lines[idx + 1]]
 
-                # ── Backward-compatible cascade ──
-                snapshot = _snapshot(path_str)
+                    if occurrence is not None:
+                        if occurrence < 1 or occurrence > len(matched):
+                            report_parts.append(f"  \u26a0\ufe0f  occurrence {occurrence} out of range (total {len(matched)})")
+                            continue
+                        matched = [matched[occurrence - 1]]
 
-                if fuzzy:
-                    strategies = [
-                        (lambda o: _mk_fuzzy(o) + '/' + _esc_rep(new) + '/', 'fuzzy'),
-                        (lambda o: _esc_pat(o) + '/' + _esc_rep(new) + '/' + g + 'I', 'fuzzy case'),
-                        (lambda o: _mk_fuzzy(o) + '/' + _esc_rep(new) + '/' + g + 'I', 'fuzzy both'),
-                    ]
-                    for maker, label in strategies:
-                        pat = maker(old)
-                        ok, _ = _sed_run(f"s/{pat}", path_str)
-                        if ok and _changed(path_str):
-                            report_parts.append(f"  ({label}) done")
-                            break
-                    else:
-                        report_parts.append("  ⚠️  text not found")
+                    if max_matches is not None and len(matched) > max_matches:
+                        report_parts.append(f"  \u26a0\ufe0f  {len(matched)} matches exceed max_matches={max_matches}")
                         continue
+
+                    if dry_run:
+                        for idx in matched:
+                            report_parts.append(f"  \U0001f4cb line {idx+1}: {lines[idx].rstrip()}")
+                        report_parts.append(f"  \u2139\ufe0f  {len(matched)} match(es), dry_run=True")
+                        continue
+
+                    for idx in matched:
+                        if use_regex:
+                            flags = _re.IGNORECASE if (cs is False) else 0
+                            count = 0 if is_global else 1
+                            lines[idx] = _re.sub(old, new, lines[idx], count=count, flags=flags)
+                        else:
+                            if is_global:
+                                lines[idx] = lines[idx].replace(old, new)
+                            else:
+                                lines[idx] = lines[idx].replace(old, new, 1)
+
+                    content = ''.join(lines)
+                    is_modified = True
+                    line_nums = ', '.join(str(idx + 1) for idx in matched)
+                    report_parts.append(f"  \u2705 replaced on line(s): {line_nums}")
                     continue
 
-                # auto cascade: exact → fuzzy ws → fuzzy ci → fuzzy both
-                strategies = [
-                    (lambda o: _esc_pat(o) + '/' + _esc_rep(new) + '/' + g, 'done'),
-                    (lambda o: _mk_fuzzy(o) + '/' + _esc_rep(new) + '/' + g, '(fuzzy whitespace) done'),
-                    (lambda o: _esc_pat(o) + '/' + _esc_rep(new) + '/' + g + 'I', '(fuzzy case-insensitive) done'),
-                    (lambda o: _mk_fuzzy(o) + '/' + _esc_rep(new) + '/' + g + 'I', '(fuzzy both) done'),
-                ]
-                for maker, label in strategies:
-                    pat = maker(old)
-                    ok, _ = _sed_run(f"s/{pat}", path_str)
-                    if ok and _changed(path_str):
-                        report_parts.append(f"  {label}")
-                        break
+                # ── Full-text replace ──
+                if use_regex:
+                    flags = _re.IGNORECASE if (cs is False) else 0
+                    count = 0 if is_global else 1
+                    new_content = _re.sub(old, new, content, count=count, flags=flags)
                 else:
-                    report_parts.append("  ⚠️  text not found")
+                    if is_global:
+                        new_content = content.replace(old, new)
+                    else:
+                        new_content = content.replace(old, new, 1)
+
+                if new_content == content:
+                    if fuzzy:
+                        old_ws = r'\s+'.join(_re.escape(w) for w in old.split())
+                        new_content = _re.sub(old_ws, new, content, count=0 if is_global else 1)
+                        if new_content == content:
+                            report_parts.append("  \u26a0\ufe0f  text not found (fuzzy also failed)")
+                            continue
+                        report_parts.append("  done (fuzzy)")
+                        content = new_content
+                        is_modified = True
+                        continue
+                    else:
+                        report_parts.append("  \u26a0\ufe0f  text not found")
+                        continue
+
+                content = new_content
+                is_modified = True
+                report_parts.append("  done")
 
             elif op_type == 'replace_line':
                 ln = op.get('line', 0)
                 text = op.get('text', '')
-                te = _esc_ln(text)
-                ok, msg = _sed_run(f"{ln}s/.*/{te}/", path_str)
-                report_parts.append(f"  line {ln}" if ok else f"  {msg}")
+                lines = content.splitlines(keepends=True)
+                if ln < 1 or ln > len(lines):
+                    report_parts.append(f"  \u26a0\ufe0f  line {ln} out of range (file has {len(lines)} lines)")
+                    continue
+                eol = '\n' if lines[ln - 1].endswith('\n') else ''
+                lines[ln - 1] = text + eol
+                content = ''.join(lines)
+                is_modified = True
+                report_parts.append(f"  line {ln}")
 
             elif op_type == 'insert_before':
                 ln = op.get('line', 0)
                 text = op.get('text', '')
-                # Handle multi-line inserts for sed i\ command
-                # sed i\ expects: N i\n line1\n line2\n lastline
-                lines = text.split('\n')
-                for i in range(len(lines)):
-                    lines[i] = _esc_ln(lines[i])
-                    if i < len(lines) - 1:
-                        lines[i] += '\\'
-                te = '\n'.join(lines)
-                ok, msg = _sed_run(f"{ln}i\\\n{te}", path_str)
-                report_parts.append(f"  before {ln}" if ok else f"  {msg}")
+                lines = content.splitlines(keepends=True)
+                if ln < 1 or ln > len(lines) + 1:
+                    report_parts.append(f"  \u26a0\ufe0f  line {ln} out of range")
+                    continue
+                insert_lines = text.split('\n')
+                for j in range(len(insert_lines)):
+                    if j < len(insert_lines) - 1 and not insert_lines[j].endswith('\n'):
+                        insert_lines[j] += '\n'
+                    elif j == len(insert_lines) - 1 and insert_lines[j]:
+                        insert_lines[j] += '\n'
+                lines[ln - 1:ln - 1] = insert_lines
+                content = ''.join(lines)
+                is_modified = True
+                report_parts.append(f"  before {ln}")
 
             elif op_type == 'insert_after':
                 ln = op.get('line', 0)
                 text = op.get('text', '')
-                # Handle multi-line inserts for sed a\ command
-                lines = text.split('\n')
-                for i in range(len(lines)):
-                    lines[i] = _esc_ln(lines[i])
-                    if i < len(lines) - 1:
-                        lines[i] += '\\'
-                te = '\n'.join(lines)
-                ok, msg = _sed_run(f"{ln}a\\\n{te}", path_str)
-                report_parts.append(f"  after {ln}" if ok else f"  {msg}")
+                lines = content.splitlines(keepends=True)
+                if ln < 1 or ln > len(lines):
+                    report_parts.append(f"  \u26a0\ufe0f  line {ln} out of range")
+                    continue
+                insert_lines = text.split('\n')
+                for j in range(len(insert_lines)):
+                    if j < len(insert_lines) - 1 and not insert_lines[j].endswith('\n'):
+                        insert_lines[j] += '\n'
+                    elif j == len(insert_lines) - 1 and insert_lines[j]:
+                        insert_lines[j] += '\n'
+                lines[ln:ln] = insert_lines
+                content = ''.join(lines)
+                is_modified = True
+                report_parts.append(f"  after {ln}")
 
             elif op_type == 'delete':
                 s = op.get('start', op.get('line', 0))
                 e = op.get('end', s)
-                ok, msg = _sed_run(f"{s},{e}d", path_str)
-                report_parts.append(f"  deleted {s}-{e}" if ok else f"  {msg}")
+                lines = content.splitlines(keepends=True)
+                if s < 1 or s > len(lines) or e < 1 or e > len(lines):
+                    report_parts.append(f"  \u26a0\ufe0f  line range {s}-{e} out of range")
+                    continue
+                del lines[s - 1:e]
+                content = ''.join(lines)
+                is_modified = True
+                report_parts.append(f"  deleted {s}-{e}")
 
             else:
-                report_parts.append(f"  ⚠️  unknown type '{op_type}'")
+                report_parts.append(f"  \u26a0\ufe0f  unknown type '{op_type}'")
 
         except Exception as e:
-            report_parts.append(f"  ⚠️  error: {e}")
+            report_parts.append(f"  \u26a0\ufe0f  error: {e}")
 
-    if not _changed(path_str):
-        report_parts.append("\nℹ️  No changes (content identical)")
-        Path(bak).unlink(missing_ok=True)
-        _file_cache.pop(path_str, None)
+    # ── 3. Write back & diff ──
+    if not is_modified and content == before:
+        report_parts.append("\n\u2139\ufe0f  No changes (content identical)")
+        bak_path.unlink(missing_ok=True)
         return '\n'.join(report_parts)
 
-    report_parts.append(f"\n📦 backup: {bak}")
-    report_parts.append(f"\n📋 diff:\n{_diff(bak, path_str)}")
-    _file_cache.pop(path_str, None)
+    path.write_bytes(content.encode(encoding))
+
+    diff = _python_diff(before, content)
+    report_parts.append(f"\n\U0001f4e6 backup: {bak_path}")
+    report_parts.append(f"\n\U0001f4cb diff:\n{diff}")
     return '\n'.join(report_parts)
