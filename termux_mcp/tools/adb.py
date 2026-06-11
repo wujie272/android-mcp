@@ -1,7 +1,7 @@
 """ADB tools: status, connect."""
 
-from android_mcp.app import mcp
-from android_mcp.lib.adb import check_setup_status as _check, connect as _connect
+from termux_mcp.app import mcp
+from termux_mcp.lib.adb import check_setup_status as _check, connect as _connect
 
 
 @mcp.tool()

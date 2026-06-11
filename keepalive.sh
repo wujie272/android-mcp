@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ──────────────────────────────────────────────────────────
-#  android-mcp 保活监控脚本 v2.0
+#  termux-mcp 保活监控脚本 v2.0
 #  用途：
 #    每 30 秒检查一次服务，挂了就自动拉起
 #    配合 http_termux_server.py 的内部重启形成「双层保险」
@@ -44,7 +44,7 @@ check_and_restart() {
 # ── 守护循环 ──
 daemon_loop() {
     echo "$$" > "$PID_FILE"
-    log "📡 android-mcp 保活监控已启动 (PID: $$, 间隔: ${CHECK_INTERVAL}s)"
+    log "📡 termux-mcp 保活监控已启动 (PID: $$, 间隔: ${CHECK_INTERVAL}s)"
 
     while true; do
         check_and_restart

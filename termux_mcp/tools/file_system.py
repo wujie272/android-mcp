@@ -6,9 +6,9 @@ import time as _time
 from pathlib import Path
 from datetime import datetime
 
-from android_mcp.app import mcp
-from android_mcp.lib.utils import async_run, ensure_path_env, err
-from android_mcp.lib.constants import HOME, SDCARD, SDCARD_SHORT
+from termux_mcp.app import mcp
+from termux_mcp.lib.utils import async_run, ensure_path_env, err
+from termux_mcp.lib.constants import HOME, SDCARD, SDCARD_SHORT
 
 _TRASH_DIR = HOME / '.trash'
 
@@ -708,6 +708,47 @@ def _python_diff(before: str, after: str) -> str:
 
 
 
+def _anchor_to_line(
+    lines: list[str],
+    anchor: str,
+    occurrence: int | None = None,
+    context_above: str | None = None,
+    context_below: str | None = None,
+    use_regex: bool = False,
+    case_sensitive: bool | None = None,
+) -> int | None:
+    """Resolve anchor text to 1-based line number. Returns None if no match."""
+    import re as _re
+    matched = []
+    for idx, line in enumerate(lines):
+        if use_regex:
+            flags = _re.IGNORECASE if (case_sensitive is False) else 0
+            if _re.search(anchor, line, flags):
+                matched.append(idx)
+        else:
+            if case_sensitive is False:
+                if anchor.lower() in line.lower():
+                    matched.append(idx)
+            else:
+                if anchor in line:
+                    matched.append(idx)
+
+    if context_above is not None:
+        matched = [idx for idx in matched
+                   if idx > 0 and context_above in lines[idx - 1]]
+    if context_below is not None:
+        matched = [idx for idx in matched
+                   if idx < len(lines) - 1 and context_below in lines[idx + 1]]
+    if occurrence is not None:
+        if occurrence < 1 or occurrence > len(matched):
+            return None
+        matched = [matched[occurrence - 1]]
+
+    if not matched:
+        return None
+    return matched[0] + 1  # 1-based
+
+
 def _snapshot(file: str) -> str:
     cache = _file_cache.get(file)
     if cache is not None:
@@ -749,9 +790,16 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
       - max_matches=N: safety cap — refuse to modify if more than N lines match
       - case_sensitive: explicit control (default: case-sensitive in line mode)
     "replace_line":   {"type":"replace_line", "line":5, "text":"new"}
+                     {"type":"replace_line", "anchor":"// TODO", "text":"new"}
     "insert_before":  {"type":"insert_before","line":3,"text":"..."}
+                     {"type":"insert_before","anchor":"private fun","occurrence":2,"text":"..."}
     "insert_after":   {"type":"insert_after","line":3,"text":"..."}
+                     {"type":"insert_after","anchor":"fun onCreate","text":"..."}
     "delete":         {"type":"delete","line":5} or {"type":"delete","start":5,"end":8}
+                     {"type":"delete","anchor":"import deprecated"}
+
+    For all operations above, "anchor" replaces "line" with text-based matching.
+    Supports: occurrence (1-based), context_above, context_below, use_regex, case_sensitive.
 
     Args:
         file_path: File to edit
@@ -771,12 +819,6 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
     before = content
     is_modified = False
 
-    # ── 2. Backup ──
-    bak_path = Path(str(path) + '.bak')
-    try:
-        bak_path.write_bytes(raw)
-    except Exception:
-        pass
 
     report_parts = [f"\U0001f4c4 {file_path}  \u7f16\u7801: {encoding}"]
 
@@ -894,9 +936,26 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
                 report_parts.append("  done")
 
             elif op_type == 'replace_line':
+                anchor = op.get('anchor')
                 ln = op.get('line', 0)
                 text = op.get('text', '')
                 lines = content.splitlines(keepends=True)
+
+                # anchor 优先于 line
+                if anchor:
+                    resolved = _anchor_to_line(
+                        lines, anchor,
+                        occurrence=op.get('occurrence'),
+                        context_above=op.get('context_above'),
+                        context_below=op.get('context_below'),
+                        use_regex=op.get('use_regex', False),
+                        case_sensitive=op.get('case_sensitive'),
+                    )
+                    if resolved is None:
+                        report_parts.append(f"  \u26a0\ufe0f  anchor '{anchor}' not found")
+                        continue
+                    ln = resolved
+
                 if ln < 1 or ln > len(lines):
                     report_parts.append(f"  \u26a0\ufe0f  line {ln} out of range (file has {len(lines)} lines)")
                     continue
@@ -907,9 +966,26 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
                 report_parts.append(f"  line {ln}")
 
             elif op_type == 'insert_before':
+                anchor = op.get('anchor')
                 ln = op.get('line', 0)
                 text = op.get('text', '')
                 lines = content.splitlines(keepends=True)
+
+                # anchor 优先于 line
+                if anchor:
+                    resolved = _anchor_to_line(
+                        lines, anchor,
+                        occurrence=op.get('occurrence'),
+                        context_above=op.get('context_above'),
+                        context_below=op.get('context_below'),
+                        use_regex=op.get('use_regex', False),
+                        case_sensitive=op.get('case_sensitive'),
+                    )
+                    if resolved is None:
+                        report_parts.append(f"  \u26a0\ufe0f  anchor '{anchor}' not found")
+                        continue
+                    ln = resolved
+
                 if ln < 1 or ln > len(lines) + 1:
                     report_parts.append(f"  \u26a0\ufe0f  line {ln} out of range")
                     continue
@@ -925,9 +1001,26 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
                 report_parts.append(f"  before {ln}")
 
             elif op_type == 'insert_after':
+                anchor = op.get('anchor')
                 ln = op.get('line', 0)
                 text = op.get('text', '')
                 lines = content.splitlines(keepends=True)
+
+                # anchor 优先于 line
+                if anchor:
+                    resolved = _anchor_to_line(
+                        lines, anchor,
+                        occurrence=op.get('occurrence'),
+                        context_above=op.get('context_above'),
+                        context_below=op.get('context_below'),
+                        use_regex=op.get('use_regex', False),
+                        case_sensitive=op.get('case_sensitive'),
+                    )
+                    if resolved is None:
+                        report_parts.append(f"  \u26a0\ufe0f  anchor '{anchor}' not found")
+                        continue
+                    ln = resolved
+
                 if ln < 1 or ln > len(lines):
                     report_parts.append(f"  \u26a0\ufe0f  line {ln} out of range")
                     continue
@@ -943,9 +1036,27 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
                 report_parts.append(f"  after {ln}")
 
             elif op_type == 'delete':
+                anchor = op.get('anchor')
                 s = op.get('start', op.get('line', 0))
                 e = op.get('end', s)
                 lines = content.splitlines(keepends=True)
+
+                # anchor 优先于 line/start
+                if anchor:
+                    resolved = _anchor_to_line(
+                        lines, anchor,
+                        occurrence=op.get('occurrence'),
+                        context_above=op.get('context_above'),
+                        context_below=op.get('context_below'),
+                        use_regex=op.get('use_regex', False),
+                        case_sensitive=op.get('case_sensitive'),
+                    )
+                    if resolved is None:
+                        report_parts.append(f"  \u26a0\ufe0f  anchor '{anchor}' not found")
+                        continue
+                    s = resolved
+                    e = resolved  # anchor 只匹配单行
+
                 if s < 1 or s > len(lines) or e < 1 or e > len(lines):
                     report_parts.append(f"  \u26a0\ufe0f  line range {s}-{e} out of range")
                     continue
@@ -963,12 +1074,10 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
     # ── 3. Write back & diff ──
     if not is_modified and content == before:
         report_parts.append("\n\u2139\ufe0f  No changes (content identical)")
-        bak_path.unlink(missing_ok=True)
         return '\n'.join(report_parts)
 
     path.write_bytes(content.encode(encoding))
 
     diff = _python_diff(before, content)
-    report_parts.append(f"\n\U0001f4e6 backup: {bak_path}")
     report_parts.append(f"\n\U0001f4cb diff:\n{diff}")
     return '\n'.join(report_parts)

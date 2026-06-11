@@ -1,12 +1,38 @@
 """Device info tools: battery, WiFi, telephony, location, storage, sensors."""
 
-from android_mcp.app import mcp
+from termux_mcp.app import mcp
 import json as _json
-from android_mcp.lib.utils import async_termux, format_json, async_run, ok, err
-from android_mcp.lib.constants import SDCARD, PID_FILE, ANDROID_LOG
+from termux_mcp.lib.utils import async_termux, format_json, async_run, ok, err
+from termux_mcp.lib.constants import SDCARD, PID_FILE, ANDROID_LOG
+from termux_mcp.lib.utils import run as sync_run, privileged_available, privileged_shell
+import asyncio
+
+
+# ── Screen Size ──
+
+@mcp.tool()
+async def get_screen_size() -> str:
+    """Get screen resolution (width x height)."""
+    if privileged_available():
+        r = sync_run('wm size', shell=True, timeout=5)
+        out = r.get('stdout', '').strip()
+        if out:
+            return out
+        r = sync_run("dumpsys display | grep -E 'mDisplayWidth|mDisplayHeight' | head -5", shell=True, timeout=5)
+        out = r.get('stdout', '').strip()
+        if out:
+            return out
+    r_w = sync_run('getprop ro.sf.lcd_width', shell=True, timeout=3)
+    r_h = sync_run('getprop ro.sf.lcd_height', shell=True, timeout=3)
+    w, h = r_w.get('stdout', '').strip(), r_h.get('stdout', '').strip()
+    if w and h:
+        return f"Physical: {w}x{h} (from properties)"
+    return "Need Shizuku or ADB to get screen size."
+
+
 import logging
 
-logger = logging.getLogger('android-mcp.device_info')
+logger = logging.getLogger('termux-mcp.device_info')
 
 
 # ── Battery ──
@@ -25,7 +51,7 @@ async def get_battery_status() -> str:
 @mcp.tool()
 async def get_battery_health() -> str:
     """Get detailed battery metrics: cycle count, capacity, voltage, etc. via dumpsys."""
-    from android_mcp.lib.utils import privileged_available, privileged_shell
+    from termux_mcp.lib.utils import privileged_available, privileged_shell
     try:
         raw = await async_termux('termux-battery-status')
         basic = {}
@@ -84,7 +110,7 @@ async def wifi_qr_code() -> str:
             return err("未连接到 WiFi")
 
         password, source = "", ""
-        from android_mcp.lib.utils import privileged_available, privileged_shell
+        from termux_mcp.lib.utils import privileged_available, privileged_shell
         if privileged_available():
             r = privileged_shell(
                 "cmd wifi get-wifi-config 2>/dev/null || cmd wifi list-networks 2>/dev/null", timeout=10)
@@ -233,7 +259,7 @@ async def read_sensor(sensor_name: str, count: int = 1) -> str:
 async def list_adb_devices() -> str:
     """List connected ADB devices (USB + WiFi) with serial, state, and model."""
     try:
-        from android_mcp.lib.utils import run as _run
+        from termux_mcp.lib.utils import run as _run
         r = _run('adb devices', shell=True, timeout=10)
         devices_raw = r.get('stdout', '').strip()
         if not devices_raw:
@@ -269,17 +295,129 @@ async def list_adb_devices() -> str:
 
 @mcp.tool()
 async def device_health_report() -> str:
-    """Check android-mcp service health (uptime, PID, log size). For auto-recovery."""
-    from android_mcp.lib.utils import get_uptime
+    """Check termux-mcp service health (uptime, PID, log size). For auto-recovery."""
+    from termux_mcp.lib.utils import get_uptime
     uptime_secs = get_uptime()
     h, m, s = int(uptime_secs // 3600), int((uptime_secs % 3600) // 60), int(uptime_secs % 60)
     pid_exists = PID_FILE.exists()
     pid_content = PID_FILE.read_text().strip() if pid_exists else 'N/A'
     log_size = ANDROID_LOG.stat().st_size if ANDROID_LOG.exists() else 0
     return (
-        f"🩺 android-mcp 健康检查\n"
+        f"🩺 termux-mcp 健康检查\n"
         f"  运行时间: {h}h {m}m {s}s  PID: {pid_content}\n"
         f"  PID文件: {'✅' if pid_exists else '❌'}  日志: {log_size:,} bytes\n"
         f"  版本: 0.4.0  Shizuku/ADB: 查看 adb_status()\n"
         f"  💡 重启: restart_android()"
     )
+
+
+# ── Device Health (merged from aggregation) ──
+
+@mcp.tool()
+async def device_health() -> str:
+    """One-shot device health: battery + storage + memory + WiFi + CPU + processes.
+
+    ⚡ 7 parallel data sources via asyncio.gather. Read-only.
+    """
+    (bat_raw, df_result, mem_result, wifi_raw,
+     model_result, android_result, uptime_result) = await asyncio.gather(
+        async_termux('termux-battery-status', timeout=10),
+        async_run(f'df -h {SDCARD}', shell=True, timeout=10),
+        async_run("cat /proc/meminfo | grep -E 'MemTotal|MemAvailable|MemFree'", shell=True, timeout=5),
+        async_termux('termux-wifi-connectioninfo', timeout=8),
+        async_run('getprop ro.product.model', shell=True, timeout=3),
+        async_run('getprop ro.build.version.release', shell=True, timeout=3),
+        async_run('uptime', shell=True, timeout=3),
+        return_exceptions=True,
+    )
+
+    sections, issues = [], []
+
+    if not isinstance(bat_raw, Exception):
+        try:
+            b = json.loads(bat_raw)
+            pct, temp = b.get('percentage', '?'), b.get('temperature', '?')
+            tn, pn = float(temp) if temp != '?' else 0, float(pct) if pct != '?' else 0
+            icon = "🟢" if pn > 20 and tn < 40 else ("🟡" if pn > 10 else "🔴")
+            sections.append(f"{icon} **电池** | {pct}% | {temp}°C | {b.get('status','?')} | 健康: {b.get('health','?')}")
+            if pn <= 10: issues.append("🔴 电量极低(≤10%)")
+            elif pn <= 20: issues.append("🟡 电量偏低(≤20%)")
+            if tn >= 40: issues.append("🔴 温度过高(≥40°C)")
+            elif tn >= 37: issues.append("🟡 温度偏高(≥37°C)")
+        except Exception as e:
+            sections.append(f"⚪ **电池** | 解析失败")
+    else:
+        sections.append(f"⚪ **电池** | 获取失败")
+
+    if not isinstance(df_result, Exception) and df_result.get('success'):
+        try:
+            for line in df_result.get('stdout', '').strip().split('\n'):
+                if '/storage' in line or SDCARD.name in line:
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        pct_str = parts[4].replace('%', '')
+                        sections.append(f"💾 **存储** | 总量:{parts[1]} 已用:{parts[2]} 剩余:{parts[3]} 使用率:{parts[4]}")
+                        try:
+                            pv = float(pct_str)
+                            if pv >= 90: issues.append(f"🔴 存储即将耗尽({parts[4]})")
+                            elif pv >= 80: issues.append(f"🟡 存储不足({parts[4]})")
+                        except: pass
+                        break
+        except: pass
+    else:
+        sections.append("⚪ **存储** | 获取失败")
+
+    if not isinstance(mem_result, Exception) and mem_result.get('success'):
+        try:
+            info = mem_result.get('stdout', '')
+            total = next((l.split(':')[1].strip() for l in info.split('\n') if 'MemTotal' in l), '')
+            avail = next((l.split(':')[1].strip() for l in info.split('\n') if 'MemAvailable' in l), '')
+            if total and avail:
+                tk = int(total.replace('kB', '').strip())
+                ak = int(avail.replace('kB', '').strip())
+                up = (tk - ak) / tk * 100
+                icon = "🟢" if up < 70 else ("🟡" if up < 85 else "🔴")
+                sections.append(f"{icon} **内存** | 总量:{total} 可用:{avail} 使用率:{up:.0f}%")
+                if up >= 85: issues.append(f"🔴 内存使用率过高({up:.0f}%)")
+                elif up >= 70: issues.append(f"🟡 内存偏高({up:.0f}%)")
+            else:
+                sections.append(f"💾 **内存** | {total} 总量 | {avail} 可用")
+        except: pass
+    else:
+        sections.append("⚪ **内存** | 获取失败")
+
+    if not isinstance(wifi_raw, Exception):
+        try:
+            w = json.loads(wifi_raw)
+            ssid, sig = w.get('ssid', '未连接'), w.get('signal_strength', '?')
+            si = "🟢"
+            if sig != '?':
+                try:
+                    sv = int(sig)
+                    if sv < -80: si = "🔴"; issues.append(f"🔴 WiFi 信号极弱({sv}dBm)")
+                    elif sv < -65: si = "🟡"
+                except: pass
+            sections.append(f"{si} **网络** | {ssid} | 信号:{sig}dBm | 速率:{w.get('link_speed','?')}Mbps")
+        except: pass
+    else:
+        sections.append("⚪ **网络** | 获取失败")
+
+    model = model_result.get('stdout', '').strip() if not isinstance(model_result, Exception) else '?'
+    android = android_result.get('stdout', '').strip() if not isinstance(android_result, Exception) else '?'
+    sections.append(f"📱 **设备** | {model} | Android {android}")
+
+    if not isinstance(uptime_result, Exception):
+        up = uptime_result.get('stdout', '').strip()
+        if up:
+            parts = up.split('load average:')
+            sections.append(f"⏱ **运行** | {parts[0].strip()}" + (f" | 负载:{parts[1].strip()}" if len(parts) > 1 else ""))
+
+    lines = ["━━━ 📊 设备健康总览 ━━━\n"]
+    lines.extend(sections)
+    if issues:
+        lines.extend(["", "── ⚠️ 注意事项 ──"] + issues)
+    score = max(0, 100 - len(issues) * 15)
+    lines.append(f"\n{'🏆' if score >= 80 else '⚠️' if score >= 50 else '🔴'} **健康评分: {score}/100**"
+                 f"{' — 状态良好' if score >= 80 else ' — 建议关注' if score >= 50 else ' — 需要处理'}")
+    return "\n".join(lines)
+

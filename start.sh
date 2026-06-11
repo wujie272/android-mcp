@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ──────────────────────────────────────────────────────────
-#  Android MCP Server 管理脚本
+#  Termux MCP Server 管理脚本
 #  统一管理 start / stop / status / restart / log
 #  用法: bash start.sh {start|stop|status|restart|log|diagnose}
 # ──────────────────────────────────────────────────────────
@@ -12,7 +12,7 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PID_FILE="$BASE_DIR/run.pid"
 LOG_FILE="$BASE_DIR/run.log"
 RUN_DIR="/data/data/com.termux/files/home/mcp-servers/run"
-PID_LINK="$RUN_DIR/android-mcp.pid"
+PID_LINK="$RUN_DIR/termux-mcp.pid"
 
 PORT="${PORT:-3000}"
 HOST="${HOST:-0.0.0.0}"
@@ -39,7 +39,7 @@ get_pid() {
             # 验证进程确实是我们的
             local cmdline
             cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || echo "")
-            if [[ "$cmdline" == *"http_termux_server"* || "$cmdline" == *"android-mcp"* ]]; then
+            if [[ "$cmdline" == *"http_termux_server"* || "$cmdline" == *"termux-mcp"* ]]; then
                 echo "$pid"
                 return 0
             fi
@@ -130,7 +130,7 @@ cmd_start() {
 
     # 启动
     mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")" "$RUN_DIR"
-    echo -e "  ${C}🚀${N} 启动 Android MCP Server..."
+    echo -e "  ${C}🚀${N} 启动 Termux MCP Server..."
     echo -e "  ${D}  主机: ${HOST}:${PORT}${N}"
     echo -e "  ${D}  日志: $LOG_FILE${N}"
 
@@ -211,7 +211,7 @@ cmd_status() {
 
         echo ""
         echo -e "  ${B}╭──────────────────────────────────────────────╮${N}"
-        echo -e "  ${B}│${N}  🤖  ${B}Android MCP Server${N}                    ${B}│${N}"
+        echo -e "  ${B}│${N}  🤖  ${B}Termux MCP Server${N}                    ${B}│${N}"
         echo -e "  ${B}├──────────────────────────────────────────────┤${N}"
         printf "  ${B}│${N}  状态:  ${G}🟢 运行中${N}                         ${B}│${N}\n"
         printf "  ${B}│${N}  PID:   %-35s ${B}│${N}\n" "$pid"
@@ -224,7 +224,7 @@ cmd_status() {
     else
         echo ""
         echo -e "  ${B}╭──────────────────────────────────────────────╮${N}"
-        echo -e "  ${B}│${N}  🤖  ${B}Android MCP Server${N}                    ${B}│${N}"
+        echo -e "  ${B}│${N}  🤖  ${B}Termux MCP Server${N}                    ${B}│${N}"
         echo -e "  ${B}├──────────────────────────────────────────────┤${N}"
         echo -e "  ${B}│${N}  状态:  ${R}🔴 未运行${N}                         ${B}│${N}"
         echo -e "  ${B}╰──────────────────────────────────────────────╯${N}"

@@ -2,10 +2,10 @@
 
 import json
 import logging
-from android_mcp.app import mcp
-from android_mcp.lib.utils import async_termux, async_run, privileged_available, privileged_shell
+from termux_mcp.app import mcp
+from termux_mcp.lib.utils import async_termux, async_run, privileged_available, privileged_shell
 
-logger = logging.getLogger('android-mcp.resources')
+logger = logging.getLogger('termux-mcp.resources')
 
 
 @mcp.resource(uri="device://battery", name="Battery Status",
@@ -78,7 +78,7 @@ async def telephony_resource() -> str:
               description="Disk usage: total, used, available 💾",
               mime_type="application/json")
 async def storage_resource() -> str:
-    from android_mcp.lib.constants import SDCARD
+    from termux_mcp.lib.constants import SDCARD
     result = {}
     try:
         r = await async_run(f'df -B1 {SDCARD}', shell=True, timeout=5)
@@ -104,7 +104,7 @@ async def storage_resource() -> str:
               mime_type="application/json")
 async def health_resource() -> str:
     from datetime import datetime
-    from android_mcp.lib.constants import SDCARD
+    from termux_mcp.lib.constants import SDCARD
     result = {'timestamp': datetime.now().isoformat()}
     try:
         b = json.loads(await async_termux('termux-battery-status', timeout=6))
@@ -151,7 +151,7 @@ async def foreground_app_resource() -> str:
                 act = re.search(r'/([a-zA-Z0-9._]+)}', out)
                 return json.dumps({'package': pkg.group(1) if pkg else None,
                                    'activity': act.group(1) if act else None}, indent=2, ensure_ascii=False)
-        from android_mcp.tools.ui_smart import _dump_xml
+        from termux_mcp.tools.ui_smart import _dump_xml
         xml = _dump_xml()
         if xml:
             from xml.etree import ElementTree

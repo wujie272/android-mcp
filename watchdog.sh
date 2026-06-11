@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ──────────────────────────────────────────────────────────
-#  android-mcp Shizuku Watchdog v1.0
+#  termux-mcp Shizuku Watchdog v1.0
 #  用途：
 #    通过 rish (Shizuku) 运行，Termux 被 OOM 杀掉后仍能存活。
 #    每 60s 检测 MCP 状态，挂了就自动拉起。

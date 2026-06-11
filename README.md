@@ -1,4 +1,4 @@
-# 🤖 Android MCP Server
+# 🤖 Termux MCP Server
 
 > **让 AI 直接操控你的 Android 手机** — 120+ 工具的 MCP 服务，运行在 Termux 上
 
@@ -32,7 +32,7 @@
 bash ~/mcp-manager.sh android
 
 # 或直接运行
-cd ~/mcp-servers/android-mcp
+cd ~/mcp-servers/termux-mcp
 
 # stdio 模式（适合 Claude Desktop 本地调用）
 python3 server.py
@@ -49,7 +49,7 @@ curl http://手机IP:3000/health
 ```json
 {
   "mcpServers": {
-    "android-mcp": {
+    "termux-mcp": {
       "type": "sse",
       "url": "http://192.168.1.102:3000/sse"
     }
@@ -71,7 +71,7 @@ curl http://手机IP:3000/health
                      │ MCP Protocol (SSE / stdio)
                      ▼
 ┌─────────────────────────────────────────────────────┐
-│              android-mcp (FastMCP)                    │
+│              termux-mcp (FastMCP)                    │
 │                                                       │
 │  ┌─────────────────────────────────────────────┐     │
 │  │  🚀 Layer 1: 核心工具 (0s)                    │     │
@@ -87,8 +87,8 @@ curl http://手机IP:3000/health
 │  └─────────────────────────────────────────────┘     │
 │                                                       │
 │  ┌─── 🔒 Security Gate ─────────────────────────┐   │
-│  │  ANDROID_MCP_READONLY    → 禁止写入操作       │   │
-│  │  ANDROID_MCP_ALLOW_SHELL → 禁止 Shell 执行    │   │
+│  │  TERMUX_MCP_READONLY    → 禁止写入操作       │   │
+│  │  TERMUX_MCP_ALLOW_SHELL → 禁止 Shell 执行    │   │
 │  └──────────────────────────────────────────────┘   │
 │                                                       │
 │  ┌─── 🏗 Privilege Chain ───────────────────────┐   │
@@ -156,10 +156,10 @@ Resources 是**可订阅的声明式数据源**，Client 可主动读取或订�
 
 ```bash
 # 只读模式 — 禁止所有写入操作（截图/点击/发短信/删文件等）
-ANDROID_MCP_READONLY=true
+TERMUX_MCP_READONLY=true
 
 # Shell 控制 — 禁止 Shell/ADB 命令执行
-ANDROID_MCP_ALLOW_SHELL=false
+TERMUX_MCP_ALLOW_SHELL=false
 ```
 
 每个工具标注安全等级：
@@ -226,7 +226,7 @@ ANDROID_MCP_ALLOW_SHELL=false
 | `set_screen_brightness(level)` | 设置亮度 0-255（需 Shizuku/ADB） |
 | `device_health_report()` | MCP 服务健康状态（运行时间/PID/日志大小） |
 | `list_adb_devices()` | 列出所有 ADB 连接设备（USB + WiFi，含型号） |
-| `restart_android(reason)` | 重启 android-mcp 服务（~2-3s 自愈） |
+| `restart_android(reason)` | 重启 termux-mcp 服务（~2-3s 自愈） |
 
 ### 📁 文件系统（15 个）
 
@@ -368,7 +368,7 @@ ANDROID_MCP_ALLOW_SHELL=false
 ## 🏗️ 项目结构
 
 ```
-android-mcp/
+termux-mcp/
 ├── server.py                    # 🚀 stdio 入口
 ├── http_server.py               # 🌐 HTTP/SSE 入口（端口 3000）
 ├── http_termux_server.py        # 🔄 HTTP 兼容版
@@ -376,7 +376,7 @@ android-mcp/
 ├── diagnose.sh                  # 🔧 环境诊断脚本
 ├── keepalive.sh                 # ♻️ 保活监控（30s 自愈）
 ├── _scan_tools.py               # 📋 工具扫描
-└── android_mcp/                 # 🧠 核心代码
+└── termux_mcp/                 # 🧠 核心代码
     ├── __init__.py              # 包入口
     ├── __main__.py              # python -m 支持
     ├── app.py                   # FastMCP 实例 + 分层加载策略
@@ -408,8 +408,8 @@ android-mcp/
 
 | 变量 | 默认值 | 说明 |
 |:-----|:-------|:------|
-| `ANDROID_MCP_READONLY` | `false` | 设为 `true` 禁止所有写入操作 |
-| `ANDROID_MCP_ALLOW_SHELL` | `true` | 设为 `false` 禁止 Shell 命令执行 |
+| `TERMUX_MCP_READONLY` | `false` | 设为 `true` 禁止所有写入操作 |
+| `TERMUX_MCP_ALLOW_SHELL` | `true` | 设为 `false` 禁止 Shell 命令执行 |
 | `HOST` | `0.0.0.0` | HTTP 服务监听地址 |
 | `PORT` | `3000` | HTTP 服务监听端口 |
 
@@ -425,7 +425,7 @@ curl http://localhost:3000/health
 # 返回:
 # {
 #   "status": "ok",
-#   "service": "android-mcp",
+#   "service": "termux-mcp",
 #   "uptime_sec": 3600,
 #   "uptime_str": "1h 0m 0s",
 #   "version": "0.2.0"
@@ -442,7 +442,7 @@ curl http://localhost:3000/health
 
 ```bash
 # 运行诊断脚本
-cd ~/mcp-servers/android-mcp && bash diagnose.sh
+cd ~/mcp-servers/termux-mcp && bash diagnose.sh
 ```
 
 ### Shizuku 连接失败？
@@ -482,6 +482,6 @@ MIT — 基于 [xlisp/termux-mcp-server](https://github.com/xlisp/termux-mcp-ser
 ---
 
 <p align="center">
-  <b>🤖 Android MCP Server v0.4</b><br>
+  <b>🤖 Termux MCP Server v0.4</b><br>
   <i>让你的手机成为 AI 的双手</i>
 </p>

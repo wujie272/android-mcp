@@ -6,12 +6,87 @@ import time as _time
 import logging
 from xml.etree import ElementTree
 from pathlib import Path
-from android_mcp.app import mcp
-from android_mcp.lib.utils import run as sync_run, privileged_shell, privileged_available
-from android_mcp.lib.utils import get_cached_ui_dump, set_ui_dump_cache, invalidate_ui_cache
-from android_mcp.lib.constants import HOME, TMP_UI_DUMP, TMP_SCREENSHOT
+from termux_mcp.app import mcp
+from termux_mcp.lib.utils import run as sync_run, privileged_shell, privileged_available
+from termux_mcp.lib.utils import get_cached_ui_dump, set_ui_dump_cache, invalidate_ui_cache
+import base64
+import shutil
+import io
+from pathlib import Path
+from termux_mcp.lib.constants import TMP_SCREENSHOT, SCREENSHOT_DEFAULT
 
-logger = logging.getLogger('android-mcp.ui_smart')
+try:
+    from PIL import Image
+    HAS_PILLOW = True
+except ImportError:
+    HAS_PILLOW = False
+
+
+from termux_mcp.lib.constants import HOME, TMP_UI_DUMP, TMP_SCREENSHOT
+
+logger = logging.getLogger('termux-mcp.ui_smart')
+
+def _resize_for_b64(image_path: Path, scale: float, max_dim: int = 1080):
+    """Resize image with Pillow, return PNG bytes or None."""
+    if not HAS_PILLOW or scale >= 1.0:
+        return None
+    try:
+        img = Image.open(image_path)
+        ow, oh = img.size
+        nw, nh = max(1, int(ow * scale)), max(1, int(oh * scale))
+        if max(nw, nh) > max_dim:
+            ratio = max_dim / max(nw, nh)
+            nw, nh = max(1, int(nw * ratio)), max(1, int(nh * ratio))
+        if nw >= ow and nh >= oh:
+            return None
+        buf = io.BytesIO()
+        img.resize((nw, nh), Image.Resampling.LANCZOS).save(buf, format='PNG', optimize=True)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+async def _take_screenshot(output_path: str = "", scale: float = 1.0) -> str:
+    """Take screenshot. Returns base64 image data."""
+    if not output_path:
+        output_path = str(SCREENSHOT_DEFAULT)
+    scale = max(0.1, min(1.0, scale))
+    try:
+        tmp = str(TMP_SCREENSHOT)
+        if privileged_available():
+            r = privileged_shell(f'screencap -p {tmp}', timeout=10)
+            if r['success']:
+                try:
+                    shutil.copy2(tmp, output_path)
+                except Exception:
+                    from termux_mcp.lib.utils import adb_connected, adb_shell
+                    if adb_connected():
+                        sync_run(f'adb pull {tmp} {output_path}', shell=True, timeout=10)
+        else:
+            r = sync_run(f'screencap -p {output_path}', shell=True, timeout=10)
+        if not r.get('success'):
+            return f"Error: {r.get('error', r.get('stderr', 'Unknown'))}"
+        path = Path(output_path)
+        if not path.exists() or path.stat().st_size == 0:
+            return "Error: Screenshot file empty"
+        try:
+            if scale < 1.0:
+                scaled = _resize_for_b64(path, scale)
+                if scaled is not None:
+                    data = base64.b64encode(scaled).decode('ascii')
+                else:
+                    with open(path, 'rb') as f:
+                        data = base64.b64encode(f.read()).decode('ascii')
+            else:
+                with open(path, 'rb') as f:
+                    data = base64.b64encode(f.read()).decode('ascii')
+            return f"data:image/png;base64,{data}"
+        except Exception as e:
+            return f"Screenshot saved but encode failed: {e}"
+    except Exception as e:
+        return f"❌ {e}"
+
+
 
 
 def _dump_xml() -> str | None:
@@ -280,8 +355,7 @@ async def get_ui_state(scale: float = 0.5, include_screenshot: bool = True) -> s
 
     if include_screenshot:
         try:
-            from android_mcp.tools.ui_automation import _take_screenshot as take_screenshot
-            ss = await take_screenshot(scale=scale)
+            ss = await _take_screenshot(scale=scale)
             if 'data:image/png;base64,' in ss:
                 b64 = ss.split('data:image/png;base64,')[-1]
                 text += f"\n\ndata:image/png;base64,{b64}"

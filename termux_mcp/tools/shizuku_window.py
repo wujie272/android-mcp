@@ -6,8 +6,8 @@ App UI 窗口关闭后不影响 rish 调用。本模块用于管理 App 窗口�
 
 import re
 
-from android_mcp.app import mcp
-from android_mcp.lib.utils import privileged_shell, run
+from termux_mcp.app import mcp
+from termux_mcp.lib.utils import privileged_shell, run
 
 SHIZUKU_PKG = "moe.shizuku.privileged.api"
 SHIZUKU_ACTIVITY = "moe.shizuku.privileged.api/moe.shizuku.manager.MainActivity"
@@ -204,7 +204,7 @@ async def shizuku_restart() -> str:
 #  Shizuku Watchdog — Termux 被杀能自启
 # ══════════════════════════════════════════════════════════════
 
-WATCHDOG_BASE = "$HOME/mcp-servers/android-mcp/watchdog"
+WATCHDOG_BASE = "$HOME/mcp-servers/termux-mcp/watchdog"
 WATCHDOG_SCRIPT = WATCHDOG_BASE + ".sh"
 WATCHDOG_PID_FILE = WATCHDOG_BASE + ".pid"
 WATCHDOG_LOG = WATCHDOG_BASE + ".log"

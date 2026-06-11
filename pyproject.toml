@@ -1,7 +1,7 @@
 [project]
-name = "android-mcp"
+name = "termux-mcp"
 version = "0.4.0"
-description = "Android MCP Server — control your Android phone from AI via Model Context Protocol"
+description = "Termux MCP Server — control your Android phone from AI via Model Context Protocol"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -20,4 +20,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-android-mcp = "server:main"
+termux-mcp = "server:main"

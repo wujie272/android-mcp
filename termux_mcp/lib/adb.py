@@ -1,11 +1,11 @@
 """ADB connection management — library layer."""
 
-from android_mcp.lib.utils import run, adb_connected, adb_shell, ensure_path_env
+from termux_mcp.lib.utils import run, adb_connected, adb_shell, ensure_path_env
 
 
 async def check_setup_status() -> str:
     """Check ADB/Shizuku status."""
-    from android_mcp.lib.utils import shizuku_available
+    from termux_mcp.lib.utils import shizuku_available
     if shizuku_available():
         return ("✅ Shizuku is available via rish! "
                 "Most tools work without ADB. ADB is fallback only.")

@@ -1,8 +1,8 @@
 """App management: running apps, packages, launch, force-stop, usage stats, restart."""
 
-from android_mcp.app import mcp
-from android_mcp.lib.utils import run, termux, format_json
-from android_mcp.lib.constants import MCP_MANAGER
+from termux_mcp.app import mcp
+from termux_mcp.lib.utils import run, termux, format_json
+from termux_mcp.lib.constants import MCP_MANAGER
 import subprocess
 import os
 import re as _re
@@ -129,7 +129,7 @@ async def app_usage_stats(days: int = 1) -> str:
 
 @mcp.tool()
 async def restart_android(reason: str = "手动触发") -> str:
-    """Restart android-mcp service (~2-3s downtime). Memory state is lost, file changes persist.
+    """Restart termux-mcp service (~2-3s downtime). Memory state is lost, file changes persist.
 
     Args:
         reason: Reason for restart (logged for debugging)

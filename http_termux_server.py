@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Android MCP Server — Streamable HTTP 模式，带自动重启 + 健康检查。
+"""Termux MCP Server — Streamable HTTP 模式，带自动重启 + 健康检查。
 
 工作模式：
   - 默认以 Streamable HTTP 运行（端口 3000）
@@ -22,8 +22,8 @@ from typing import Optional
 # ── 确保能找到项目模块 ──
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from android_mcp import mcp
-from android_mcp.lib.utils import get_uptime
+from termux_mcp import mcp
+from termux_mcp.lib.utils import get_uptime
 
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -102,7 +102,7 @@ async def health_check(request):
 
     return JSONResponse({
         "status": "ok",
-        "service": "android-mcp",
+        "service": "termux-mcp",
         "version": "0.4.0",
         "pid": os.getpid(),
         "port": PORT,
@@ -144,7 +144,7 @@ def run_with_auto_restart():
 
     while running:
         try:
-            print(f"🚀 android-mcp Streamable HTTP → http://{HOST}:{PORT}/mcp")
+            print(f"🚀 termux-mcp Streamable HTTP → http://{HOST}:{PORT}/mcp")
             print(f"   🩺 Health check → http://{HOST}:{PORT}/health")
             print(f"   📝 PID: {os.getpid()}")
             if restart_count > 0:
@@ -184,4 +184,4 @@ if __name__ == '__main__':
         run_with_auto_restart()
     finally:
         remove_pid_file()
-        print("✅ android-mcp 已安全停止")
+        print("✅ termux-mcp 已安全停止")

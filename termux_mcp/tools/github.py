@@ -2,7 +2,7 @@
 
 import os
 import base64
-from android_mcp.app import mcp
+from termux_mcp.app import mcp
 
 GH_TOKEN = None
 GH_USER = "jaye2720"

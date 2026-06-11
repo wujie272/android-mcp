@@ -14,17 +14,17 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from android_mcp.app import mcp
-from android_mcp.lib.utils import (
+from termux_mcp.app import mcp
+from termux_mcp.lib.utils import (
     async_run,
     ok,
     err,
     check_shell_permission,
     ensure_path_env,
 )
-from android_mcp.lib.security import get_assessment
+from termux_mcp.lib.security import get_assessment
 
-logger = logging.getLogger("android-mcp.execute")
+logger = logging.getLogger("termux-mcp.execute")
 
 # ── Constants ──
 
@@ -291,7 +291,7 @@ async def execute_command(
     ⚠️ 安全机制:
     - 自动评估风险等级，危险命令（rm -rf / 等）默认拦截
     - 可用 FORCE=1 前缀强制绕过: `FORCE=1 rm -rf /tmp/cache`
-    - 受 ANDROID_MCP_ALLOW_SHELL 环境变量控制（默认允许）
+    - 受 TERMUX_MCP_ALLOW_SHELL 环境变量控制（默认允许）
 
     🏗️ 后台执行:
     - background=True 立即返回 job_id，不阻塞

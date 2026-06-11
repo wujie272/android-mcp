@@ -10,17 +10,17 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
-from android_mcp.lib.constants import HOME, LOG_DIR, RISH as _RISH_PATH
+from termux_mcp.lib.constants import HOME, LOG_DIR, RISH as _RISH_PATH
 
 STARTUP_TIME = time.time()
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-logger = logging.getLogger('android-mcp')
+logger = logging.getLogger('termux-mcp')
 logger.setLevel(logging.DEBUG)
 
 _fh = RotatingFileHandler(
-    str(LOG_DIR / 'android_mcp.log'),
+    str(LOG_DIR / 'termux_mcp.log'),
     maxBytes=1_000_000, backupCount=3, encoding='utf-8',
 )
 _fh.setLevel(logging.DEBUG)
@@ -381,8 +381,8 @@ def format_json(raw: str) -> str:
 
 # ── Security gates ──
 
-READONLY_MODE = os.environ.get('ANDROID_MCP_READONLY', '').lower() in ('true', '1', 'yes', 'readonly')
-ALLOW_SHELL = os.environ.get('ANDROID_MCP_ALLOW_SHELL', 'true').lower() in ('true', '1', 'yes', 'allow')
+READONLY_MODE = os.environ.get('TERMUX_MCP_READONLY', os.environ.get('ANDROID_MCP_READONLY', '')).lower() in ('true', '1', 'yes', 'readonly')
+ALLOW_SHELL = os.environ.get('TERMUX_MCP_ALLOW_SHELL', os.environ.get('ANDROID_MCP_ALLOW_SHELL', 'true')).lower() in ('true', '1', 'yes', 'allow')
 
 DANGER_READONLY = "🔒 只读"
 DANGER_LOW = "🔓 低风险"
@@ -396,13 +396,13 @@ def check_readonly() -> bool:
 
 def check_write_permission(action: str = "write") -> str | None:
     if READONLY_MODE:
-        return f"❌ 写入已禁止：只读模式。设置 ANDROID_MCP_READONLY=false 启用。"
+        return f"❌ 写入已禁止：只读模式。设置 TERMUX_MCP_READONLY=false (或 ANDROID_MCP_READONLY=false) 启用。"
     return None
 
 
 def check_shell_permission(action: str = "shell") -> str | None:
     if not ALLOW_SHELL:
-        return f"❌ Shell 命令已禁止。设置 ANDROID_MCP_ALLOW_SHELL=true 启用。"
+        return f"❌ Shell 命令已禁止。设置 TERMUX_MCP_ALLOW_SHELL=true (或 ANDROID_MCP_ALLOW_SHELL=true) 启用。"
     return None
 
 

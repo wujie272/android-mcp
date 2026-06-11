@@ -1,8 +1,8 @@
 """Communication: SMS, contacts, clipboard, notifications."""
 
 import time as _time
-from android_mcp.app import mcp
-from android_mcp.lib.utils import termux, format_json, run, adb_connected
+from termux_mcp.app import mcp
+from termux_mcp.lib.utils import termux, format_json, run, adb_connected
 
 _clipboard_fallback = ""
 _clipboard_history: list[dict] = []
@@ -28,8 +28,33 @@ async def list_contacts() -> str:
 
 
 @mcp.tool()
-async def get_clipboard() -> str:
-    """Get clipboard content. Falls back to in-memory if Termux:API unavailable."""
+async def clipboard(action: str = 'read', text: str = '') -> str:
+    """📋 Read or write clipboard.
+
+    Args:
+        action: 'read' to get clipboard content, 'write' to set it
+        text: Text to write (required when action='write')
+    """
+    global _clipboard_fallback, _clipboard_history
+
+    if action == 'write':
+        if not text:
+            return '❌ 写入剪贴板时需要提供 text 参数'
+        _clipboard_fallback = text
+        if not _clipboard_history or _clipboard_history[0]['text'] != text[:200]:
+            _clipboard_history.insert(0, {'text': text[:200], 'time': _time.strftime('%H:%M:%S'), 'chars': len(text)})
+            if len(_clipboard_history) > _MAX_CLIP_HISTORY:
+                _clipboard_history.pop()
+        result = termux('termux-clipboard-set', [text])
+        if result and 'Error' not in result:
+            return f"✅ 剪贴板已写入 ({len(text)} chars)"
+        if adb_connected():
+            r = run(f'am broadcast -a clipper.set -e text "{text}"', shell=True, timeout=5)
+            if r['success']:
+                return f"✅ 剪贴板已写入 via ADB ({len(text)} chars)"
+        return f"✅ 剪贴板已保存到内存 ({len(text)} chars)。安装 Termux:API 可写入系统剪贴板。"
+
+    # Default: read
     raw = termux('termux-clipboard-get')
     if raw and 'Error' not in raw and raw.strip():
         return raw.strip()
@@ -39,26 +64,7 @@ async def get_clipboard() -> str:
         r = run('am broadcast -a clipper.get', shell=True, timeout=5)
         if r['success'] and r.get('stdout'):
             return r['stdout']
-    return "Clipboard empty. Install Termux:API from F-Droid. Use set_clipboard() to set."
-
-
-@mcp.tool()
-async def set_clipboard(text: str) -> str:
-    """Set clipboard content. Saved in-memory as fallback."""
-    global _clipboard_fallback, _clipboard_history
-    _clipboard_fallback = text
-    if not _clipboard_history or _clipboard_history[0]['text'] != text[:200]:
-        _clipboard_history.insert(0, {'text': text[:200], 'time': _time.strftime('%H:%M:%S'), 'chars': len(text)})
-        if len(_clipboard_history) > _MAX_CLIP_HISTORY:
-            _clipboard_history.pop()
-    result = termux('termux-clipboard-set', [text])
-    if result and 'Error' not in result:
-        return f"Clipboard set ({len(text)} chars)"
-    if adb_connected():
-        r = run(f'am broadcast -a clipper.set -e text "{text}"', shell=True, timeout=5)
-        if r['success']:
-            return f"Clipboard set via ADB ({len(text)} chars)"
-    return f"Clipboard saved in-memory ({len(text)} chars). Install Termux:API."
+    return "📋 剪贴板为空。安装 Termux:API 或先写入内容。"
 
 
 @mcp.tool()
@@ -111,7 +117,7 @@ async def show_toast(text: str, short: bool = True) -> str:
 async def clipboard_history(limit: int = 10) -> str:
     """Show recent clipboard history (in-memory, lost on restart)."""
     if not _clipboard_history:
-        return "No history. Use set_clipboard() to store."
+        return "No history. Use clipboard(action='write', text=...) to store."
     limit = min(limit, len(_clipboard_history))
     lines = [f"📋 Clipboard History (last {limit} of {len(_clipboard_history)}):"]
     for i, e in enumerate(_clipboard_history[:limit], 1):

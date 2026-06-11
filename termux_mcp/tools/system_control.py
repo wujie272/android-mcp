@@ -1,7 +1,7 @@
 """System control: volume, torch, vibrate, TTS, brightness, fingerprint."""
 
-from android_mcp.app import mcp
-from android_mcp.lib.utils import termux, format_json, run, privileged_available, privileged_shell
+from termux_mcp.app import mcp
+from termux_mcp.lib.utils import termux, format_json, run, privileged_available, privileged_shell
 
 
 @mcp.tool()

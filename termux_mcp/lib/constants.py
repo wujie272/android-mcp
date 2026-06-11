@@ -10,8 +10,8 @@ RUN_DIR = MCP_SERVERS_DIR / 'run'
 RISH = HOME / 'rish'
 MCP_MANAGER = HOME / 'mcp-manager.sh'
 
-PID_FILE = RUN_DIR / 'android-mcp.pid'
-ANDROID_LOG = LOG_DIR / 'android_mcp.log'
+PID_FILE = RUN_DIR / 'termux-mcp.pid'
+ANDROID_LOG = LOG_DIR / 'termux_mcp.log'
 
 SDCARD = Path('/storage/emulated/0')
 SDCARD_SHORT = Path('/sdcard')
@@ -24,7 +24,7 @@ SCREENSHOT_DEFAULT = HOME / 'screenshot.png'
 UI_DUMP_DEFAULT = HOME / 'ui_dump.xml'
 PHOTO_DEFAULT = HOME / 'photo.jpg'
 
-MCP_SERVER_DIR = Path('/data/data/com.termux/files/home/mcp-servers/android-mcp')
+MCP_SERVER_DIR = Path('/data/data/com.termux/files/home/mcp-servers/termux-mcp')
 
 PHOTO_ALT_DIRS = [
     SDCARD / 'DCIM',

@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ──────────────────────────────────────────────────────────
-#  android-mcp 环境诊断脚本
-#  检查运行 Android MCP Server 所需的所有依赖
+#  termux-mcp 环境诊断脚本
+#  检查运行 Termux MCP Server 所需的所有依赖
 #  用法: bash diagnose.sh [--verbose]
 # ──────────────────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ VERBOSE=false
 
 echo ""
 echo -e "  ${B}╭──────────────────────────────────────────────╮${N}"
-echo -e "  ${B}│${N}  🩺  ${B}Android MCP 环境诊断${N}                       ${B}│${N}"
+echo -e "  ${B}│${N}  🩺  ${B}Termux MCP 环境诊断${N}                       ${B}│${N}"
 echo -e "  ${B}╰──────────────────────────────────────────────╯${N}"
 echo ""
 
@@ -124,7 +124,7 @@ fi
 
 # ── 8. 日志 ──
 echo -e "  ${B}── 日志 ──${N}"
-local log_file="/data/data/com.termux/files/home/mcp-servers/logs/android_mcp.log"
+local log_file="/data/data/com.termux/files/home/mcp-servers/logs/termux_mcp.log"
 if [[ -f "$log_file" ]]; then
     local size
     size=$(du -h "$log_file" | cut -f1)
