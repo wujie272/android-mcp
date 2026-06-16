@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from termux_mcp.app import mcp
+from mcp.server.fastmcp import Context
 from termux_mcp.lib.utils import (
     async_run,
     ok,
@@ -277,6 +278,7 @@ def _send_job_notification(job: ShellJob):
 async def execute_command(
     command: str = "",
     working_directory: str = ".",
+    ctx: Context = None,
     timeout: int = DEFAULT_TIMEOUT,
     background: bool = False,
     grep: str = "",
@@ -376,6 +378,8 @@ async def execute_command(
 
     # ── Foreground mode (blocking) ──
     try:
+        if ctx:
+            await ctx.report_progress(progress=0, total=0)
         r = await async_run(final_cmd, timeout=timeout, shell=True, cwd=cwd)
 
         rc = r.get("returncode")
@@ -383,6 +387,9 @@ async def execute_command(
         stderr = r.get("stderr", "").strip()
         error = r.get("error", "")
         timed_out = r.get("timed_out", False)
+
+        if ctx:
+            await ctx.report_progress(progress=1, total=1)
 
         # Save to file if requested
         if output_file and stdout:

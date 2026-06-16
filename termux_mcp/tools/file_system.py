@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime
 
 from termux_mcp.app import mcp
+from mcp.server.fastmcp import Context
 from termux_mcp.lib.utils import async_run, ensure_path_env, err
 from termux_mcp.lib.constants import HOME, SDCARD, SDCARD_SHORT
 
@@ -296,39 +297,92 @@ async def search_files(
     use_regex: bool = False,
     context_lines: int = 0,
     fuzzy: bool = False,
+    ctx: Context = None,
 ) -> str:
     """🔍 统一搜索：文件名 + 内容 + 元数据全维度过滤。
 
     三合一引擎：
-    · 无 query → 文件名搜索（fd，比 find 快 5~10x）
-    · 有 query → 内容搜索（ripgrep）→ 元数据过滤
-    · fuzzy=True → 模糊文件名搜索（fzf）
+    · 无 query → fd 文件名搜索（比 find 快 5~10x）
+    · 有 query → ripgrep 内容搜索 → 元数据过滤
+    · fuzzy=True → fzf 模糊文件名搜索
 
     自动跳过 node_modules/.git/.cargo 等大目录。
 
     Args:
-        query: 内容关键词（不传则仅按文件名搜索）
-        path: 搜索目录（默认当前目录）
-        pattern: 文件名 glob 模式，如 "*.md"、"*test*"（默认 "*"）
-        exclude_patterns: 排除模式，如 ["node_modules", ".git"]
-        max_results: 最大返回数（默认 200）
-        max_depth: 最大搜索深度
-        file_types: 扩展名过滤，如 ["md", "py"]
-        modified_days: 最近 N 天内修改
-        min_size: 大小下限（字节）
-        max_size: 大小上限（字节）
-        sort_by: "name" / "size" / "date"（默认 "name"）
-        sort_order: "asc" / "desc"（默认 "asc"）
-        case_sensitive: 大小写敏感（默认 False）
-        use_regex: 将 pattern/query 视为正则（默认 False）
-        context_lines: 内容匹配上下文行数（默认 0，仅 query 时有效）
-        fuzzy: 启用 fzf 模糊文件名匹配（默认 False）
+        query: 搜索关键词（文件内容搜索）。
+            【核心逻辑】
+            · 有 query → ripgrep 全文搜索文件内容（不只是搜文件名！）
+            · 无 query → fd 按文件名搜索（结合 pattern glob 匹配）
+            · query + fuzzy=True → fzf 模糊文件名搜索
+
+            【典型场景】
+            · 搜函数/类定义 → query='class McpManager'
+            · 搜某个关键词引用 → query='import FastMCP'
+            · 不确定文件名但知道内容 → 传 query 就对了
+            · 纯粹想找某个名字的文件 → 不传 query，传 pattern='*.py'
+
+            ⚠️ 返回空 ≠ 没文件！可能只是内容没匹配到，试试不传 query 仅搜文件名
+
+        path: 搜索根目录（默认当前目录）。
+            在 Termux 中传 '/data/data/com.termux/files/home' 搜索全用户目录，
+            或指定特定子目录（如 'rikkahub/'）缩小范围提速。
+
+        pattern: 文件名 glob 模式（默认 '*' 匹配所有）。
+            · 有 query → 仅在匹配 pattern 的文件中搜内容
+            · 无 query → 按 pattern 搜索文件名
+            示例：'*.kt', '*test*', 'McpManager*'
+
+        exclude_patterns: 额外排除模式，如 ["node_modules", ".git"]。
+            默认已自动排除：node_modules, .git, .cargo, .gradle,
+            __pycache__, .venv, venv, env, vendor, build, dist
+
+        max_results: 最大返回条数（默认 200）。
+            结果过多时自动截断，如需更多请增大此值。
+
+        max_depth: 最大搜索深度。不传则不限制。
+            搜索大目录时建议设 depth=3 避免过深递归。
+
+        file_types: 按扩展名过滤，如 ['py', 'kt', 'md']。
+            等价于 pattern='*.py' 但更方便指定多种类型。
+            注意：和 pattern 同时使用时取交集。
+
+        modified_days: 限定最近 N 天内修改的文件。
+            示例：modified_days=7 → 最近一周修改的文件
+
+        min_size: 大小下限（字节），过滤掉过小的文件。
+        max_size: 大小上限（字节），过滤掉过大的文件。
+
+        sort_by: 排序字段。"name"（默认，按文件名）/ "size"（按大小）/ "date"（按修改时间）
+        sort_order: 排序方向。"asc"（默认，升序）/ "desc"（降序）
+
+        case_sensitive: 大小写敏感（默认 False，不区分）。
+        use_regex: 将 pattern/query 视为正则表达式（默认 False）。
+            启用后按正则匹配而非纯文本/glob。
+
+        context_lines: 匹配行的上下文行数（默认 0，仅 query 时有效）。
+            设为 2 可显示匹配行前后各 2 行，方便看上下文。
+
+        fuzzy: 启用 fzf 模糊文件名匹配（默认 False）。
+            在不确定文件名拼写时非常有用。
+            需要系统中已安装 fzf（pkg install fzf）。
+
+        【快速决策表 - 帮我选参数】
+        我想…                              → 传什么参数
+        ────────────────────────────────────────────────
+        搜包含某关键词的文件               → query='关键词'
+        按文件名搜特定文件                 → pattern='*.kt'（不传 query）
+        不确定文件名但知道内容             → query='内容片段'
+        模糊搜文件名（记不清拼写）          → fuzzy=True, query='大概名字'
+        找某类型的文件                     → file_types=['py', 'kt']
+        找最近改过的文件                   → modified_days=3
+        看看目录下有什么                   → 啥都不传（或只传 path）
+        精确定位函数定义                   → query='fun getName' file_types=['kt']
     """
     if path is None:
         path = "."
     if pattern is None:
         pattern = "*"
-    root = Path(path).expanduser()
+    root = Path(path).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         return f"❌ 无效目录: {path}"
 
@@ -339,12 +393,14 @@ async def search_files(
 
     if fuzzy and not has_query:
         # 🔮 fzf 模糊文件名搜索
+        await ctx.report_progress(progress=1, total=4)
         results, total_found = await _fuzzy_search(
             root, pattern, exclude, max_results, max_depth, file_types,
             modified_days, min_size, max_size, sort_by, sort_order,
         )
     elif not has_query:
         # 🚀 fd 文件名搜索
+        await ctx.report_progress(progress=2, total=4)
         results, total_found = await _search_by_name_fd(
             root, pattern, exclude, max_results, max_depth, file_types,
             modified_days, min_size, max_size, sort_by, sort_order,
@@ -352,6 +408,7 @@ async def search_files(
         )
     else:
         # 🔬 rg 内容搜索 + 元数据过滤
+        await ctx.report_progress(progress=3, total=4)
         results, total_matched = await _search_by_content_rg(
             query.strip(), root, pattern if pattern != "*" else None,
             exclude, max_results, file_types,
@@ -373,6 +430,161 @@ async def search_files(
 
 
 # ══════════════════════════════════════════════
+
+def _build_tree_lines(rel_paths: list[str], root_str: str) -> list[str]:
+    """从相对路径列表构建树状显示行。"""
+    if not rel_paths:
+        return []
+
+    # 构建嵌套树结构：{}表示目录，None表示文件
+    tree: dict[str, dict | None] = {}
+    for rel in rel_paths:
+        parts = rel.split('/')
+        cur = tree
+        for i, part in enumerate(parts):
+            if i == len(parts) - 1:
+                cur[part] = None  # 文件
+            else:
+                if part not in cur:
+                    cur[part] = {}
+                cur = cur[part]
+
+    # 折叠单子目录链：a/b/c/ → a/b/c/（减少无意义嵌套）
+    def _collapse(node: dict) -> dict:
+        result: dict[str, dict | None] = {}
+        for key, val in node.items():
+            if isinstance(val, dict):
+                # 尝试尽可能折叠
+                ck, cv = key, val
+                while len(cv) == 1:
+                    only_key = next(iter(cv))
+                    only_val = cv[only_key]
+                    if isinstance(only_val, dict):
+                        ck += "/" + only_key
+                        cv = only_val
+                    else:
+                        cv = {only_key: only_val}
+                        break
+                result[ck] = _collapse(cv)
+            else:
+                result[key] = val
+        return result
+    tree = _collapse(tree)
+
+    lines = []
+    root_name = Path(root_str).name or Path(root_str).stem or root_str
+    lines.append(f"📁 {root_name}/")
+
+    def _render(node: dict, prefix: str) -> None:
+        # 排序：目录在前，文件在后，各自按字母序
+        items = sorted(node.items(), key=lambda x: (0 if isinstance(x[1], dict) else 1, x[0].lower()))
+        for i, (name, child) in enumerate(items):
+            is_last = i == len(items) - 1
+            connector = "└── " if is_last else "├── "
+            suffix = "/" if isinstance(child, dict) else ""
+            lines.append(f"{prefix}{connector}{name}{suffix}")
+            ext = "    " if is_last else "│   "
+            if isinstance(child, dict):
+                _render(child, prefix + ext)
+
+    _render(tree, "")
+    return lines
+
+
+@mcp.tool()
+async def search_files_tree(
+    query: str | None = None,
+    path: str | None = None,
+    pattern: str | None = None,
+    exclude_patterns: list[str] | None = None,
+    max_results: int = 200,
+    max_depth: int | None = None,
+    file_types: list[str] | None = None,
+    modified_days: int | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
+    case_sensitive: bool = False,
+    use_regex: bool = False,
+    fuzzy: bool = False,
+    ctx: Context = None,
+) -> str:
+    """🌳 树状搜索结果：以目录树形式展示匹配的文件（替代扁平列表）。
+
+    与 search_files 相同搜索能力，但结果以 tree 风格展示层级结构。
+    适合快速浏览项目结构，直观看到文件在哪个目录下。
+
+    Args:
+        参数含义与 search_files 完全一致。
+    """
+    if path is None:
+        path = "."
+    if pattern is None:
+        pattern = "*"
+    root = Path(path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        return f"❌ 无效目录: {path}"
+
+    exclude = set(exclude_patterns or [])
+    exclude.update(_AUTO_SKIP_DIRS - exclude)
+
+    has_query = query is not None and query.strip()
+
+    if fuzzy and not has_query:
+        await ctx.report_progress(progress=1, total=2)
+        results, total_found = await _fuzzy_search(
+            root, pattern, exclude, max_results, max_depth, file_types,
+            modified_days, min_size, max_size, "name", "asc",
+        )
+    elif not has_query:
+        await ctx.report_progress(progress=1, total=2)
+        results, total_found = await _search_by_name_fd(
+            root, pattern, exclude, max_results, max_depth, file_types,
+            modified_days, min_size, max_size, "name", "asc",
+            case_sensitive, use_regex,
+        )
+    else:
+        await ctx.report_progress(progress=1, total=2)
+        results, total_matched = await _search_by_content_rg(
+            query.strip(), root, pattern if pattern != "*" else None,
+            exclude, max_results, file_types,
+            modified_days, min_size, max_size, "name", "asc",
+            case_sensitive, use_regex, 0, fuzzy,
+        )
+        if not results and total_matched == 0:
+            try:
+                r = await async_run(['rg', '--version'], timeout=5, shell=False)
+                has_rg = r.get('success', False)
+            except Exception:
+                has_rg = False
+            if not has_rg:
+                return "❌ 系统中未安装 ripgrep（rg），请执行: pkg install ripgrep\n💡 或不传 query 使用纯文件名搜索"
+            return f"🔍 未找到包含 '{query}' 的文件"
+        await ctx.report_progress(progress=2, total=2)
+        total_found = total_matched
+        root_str = str(root)
+        rel_paths = []
+        for r in results:
+            rel = r['path']
+            if rel.startswith(root_str):
+                rel = rel[len(root_str):].lstrip('/')
+            rel_paths.append(rel)
+        tree_lines = _build_tree_lines(rel_paths, root_str)
+        header = f"🌳 搜索: {root_str} 匹配: '{pattern}'"
+        footer = f"📊 共 {total_found} 项" + (f"，显示前 {max_results} 项" if total_found > max_results else "")
+        return f"{header}\n{footer}\n\n" + "\n".join(tree_lines)
+
+    await ctx.report_progress(progress=2, total=2)
+    root_str = str(root)
+    rel_paths = []
+    for r in results:
+        rel = r['path']
+        if rel.startswith(root_str):
+            rel = rel[len(root_str):].lstrip('/')
+        rel_paths.append(rel)
+    tree_lines = _build_tree_lines(rel_paths, root_str)
+    header = f"🌳 搜索: {root_str} 匹配: '{pattern}'"
+    footer = f"📊 共 {total_found} 项" + (f"，显示前 {max_results} 项" if total_found > max_results else "")
+    return f"{header}\n{footer}\n\n" + "\n".join(tree_lines)
 
 
 # ══════════════════════════════════════════════
@@ -716,8 +928,13 @@ def _anchor_to_line(
     context_below: str | None = None,
     use_regex: bool = False,
     case_sensitive: bool | None = None,
+    require_unique: bool = False,
 ) -> int | None:
-    """Resolve anchor text to 1-based line number. Returns None if no match."""
+    """Resolve anchor text to 1-based line number. Returns None if no match.
+
+    When require_unique=True and >1 match found, raises ValueError with
+    all matching lines and context to help the caller disambiguate.
+    """
     import re as _re
     matched = []
     for idx, line in enumerate(lines):
@@ -746,6 +963,26 @@ def _anchor_to_line(
 
     if not matched:
         return None
+
+    # Strict mode: refuse when anchor matches multiple locations
+    if require_unique and len(matched) > 1:
+        ctx_lines = []
+        for idx in matched:
+            start = max(0, idx - 2)
+            end = min(len(lines), idx + 3)
+            snippet = ''.join(lines[start:end])
+            ctx_lines.append(
+                "  line %d (surrounding %d-%d):\n%s" % (
+                    idx + 1, start + 1, end, snippet.rstrip()
+                )
+            )
+        raise ValueError(
+            "anchor '%s' matches %d locations "
+            "(occurrence not specified). Use occurrence=N to pick one:\n"
+            % (anchor, len(matched))
+            + '\n---\n'.join(ctx_lines)
+        )
+
     return matched[0] + 1  # 1-based
 
 
@@ -772,13 +1009,13 @@ def _changed(file: str) -> bool:
 
 
 @mcp.tool()
-async def edit_file(file_path: str, operations: list[dict]) -> str:
+async def edit_file(file_path: str, operations: list[dict], ctx: Context = None) -> str:
     """Edit a file using Python native operations (no sed).
     Supports all operation types: replace, replace_line, insert_before, insert_after, delete.
     Full Unicode support — Chinese, multi-byte, special characters all handled correctly.
 
     Operation dicts:
-      type: "replace" | "replace_line" | "insert_before" | "insert_after" | "delete"
+      type: "str_replace" | "replace" | "replace_line" | "insert_before" | "insert_after" | "delete"
 
     "replace":
       {"type":"replace","old":"...","new":"...","global":true, "use_regex":false, "fuzzy":false}
@@ -802,8 +1039,24 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
     Supports: occurrence (1-based), context_above, context_below, use_regex, case_sensitive.
 
     Args:
-        file_path: File to edit
-        operations: List of operation dicts
+        file_path: 要编辑的文件路径。自动检测编码（utf-8/gbk/shift-jis 等）。
+        operations: 编辑操作列表，每个操作是一个 dict。
+            每条操作都会输出修改结果，最终会展示 diff 对比。
+
+            【快速选型表 - 用哪个 type？】
+            你想…                                    → 用 type
+            ────────────────────────────────────────────────────────────────
+            替换文件中的某段文本（精确匹配）          → "str_replace"
+            替换文本（支持正则/模糊/上下文锚定）      → "replace"
+            替换整行内容                              → "replace_line"
+            在某行前面插入                            → "insert_before"
+            在某行后面插入                            → "insert_after"
+            删除某行或某段                            → "delete"
+
+            【安全机制】
+            · replace 支持 dry_run=True 先预览不修改
+            · replace 支持 max_matches=N 限制匹配数，防误改
+            · 文件已存在时自动备份对比出 diff
     """
     import difflib as _difflib
     import re as _re
@@ -822,12 +1075,58 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
 
     report_parts = [f"\U0001f4c4 {file_path}  \u7f16\u7801: {encoding}"]
 
+    total_ops = len(operations)
     for i, op in enumerate(operations):
+        if ctx:
+            await ctx.report_progress(progress=i, total=total_ops)
         op_type = op.get('type', '')
+
+        # ── 自动推断 type（解决手写 JSON 漏 type 字段）──
+        if not op_type:
+            if 'old' in op:
+                op_type = 'replace'
+            elif 'text' in op and ('line' in op or 'anchor' in op):
+                # 有 text + line/anchor：推测 insert_before/after
+                # 但无法区分具体方向，默认 replace_line (最安全)
+                # 如果有 'after' 或 'before' 布尔字段则用
+                if op.get('after'):
+                    op_type = 'insert_after'
+                elif op.get('before'):
+                    op_type = 'insert_before'
+                else:
+                    op_type = 'replace_line'
+            elif 'start' in op or ('line' in op and 'text' not in op):
+                op_type = 'delete'
+            else:
+                report_parts.append(f"  ⚠️  cannot infer type from fields: {list(op.keys())}")
+                continue
+
         report_parts.append(f"\n[{i+1}] {op_type}")
 
         try:
-            if op_type == 'replace':
+            if op_type == 'str_replace':
+                old = op.get('old', '')
+                new = op.get('new', '')
+
+                if not old:
+                    report_parts.append("  \u26a0\ufe0f  missing 'old'")
+                    continue
+
+                count = content.count(old)
+                if count == 0:
+                    report_parts.append("  \u274c  text not found (0 matches)")
+                    report_parts.append("  \U0001f4a1  old_str must match EXACTLY including whitespace")
+                    continue
+                elif count > 1:
+                    report_parts.append("  \u274c  text found at %d locations (must be unique)" % count)
+                    report_parts.append("  \U0001f4a1  include more surrounding context")
+                    continue
+
+                content = content.replace(old, new, 1)
+                is_modified = True
+                report_parts.append("  \u2705  str_replace: 1 match, replaced")
+
+            elif op_type == 'replace':
                 old = op.get('old', '')
                 new = op.get('new', '')
                 is_global = op.get('global', False)
@@ -943,14 +1242,19 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
 
                 # anchor 优先于 line
                 if anchor:
-                    resolved = _anchor_to_line(
-                        lines, anchor,
-                        occurrence=op.get('occurrence'),
-                        context_above=op.get('context_above'),
-                        context_below=op.get('context_below'),
-                        use_regex=op.get('use_regex', False),
-                        case_sensitive=op.get('case_sensitive'),
-                    )
+                    try:
+                        resolved = _anchor_to_line(
+                            lines, anchor,
+                            occurrence=op.get('occurrence'),
+                            context_above=op.get('context_above'),
+                            context_below=op.get('context_below'),
+                            use_regex=op.get('use_regex', False),
+                            case_sensitive=op.get('case_sensitive'),
+                            require_unique=(op.get('occurrence') is None),
+                        )
+                    except ValueError as e:
+                        report_parts.append(f"  \u274c  {e}")
+                        continue
                     if resolved is None:
                         report_parts.append(f"  \u26a0\ufe0f  anchor '{anchor}' not found")
                         continue
@@ -973,14 +1277,19 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
 
                 # anchor 优先于 line
                 if anchor:
-                    resolved = _anchor_to_line(
-                        lines, anchor,
-                        occurrence=op.get('occurrence'),
-                        context_above=op.get('context_above'),
-                        context_below=op.get('context_below'),
-                        use_regex=op.get('use_regex', False),
-                        case_sensitive=op.get('case_sensitive'),
-                    )
+                    try:
+                        resolved = _anchor_to_line(
+                            lines, anchor,
+                            occurrence=op.get('occurrence'),
+                            context_above=op.get('context_above'),
+                            context_below=op.get('context_below'),
+                            use_regex=op.get('use_regex', False),
+                            case_sensitive=op.get('case_sensitive'),
+                            require_unique=(op.get('occurrence') is None),
+                        )
+                    except ValueError as e:
+                        report_parts.append(f"  \u274c  {e}")
+                        continue
                     if resolved is None:
                         report_parts.append(f"  \u26a0\ufe0f  anchor '{anchor}' not found")
                         continue
@@ -1008,14 +1317,19 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
 
                 # anchor 优先于 line
                 if anchor:
-                    resolved = _anchor_to_line(
-                        lines, anchor,
-                        occurrence=op.get('occurrence'),
-                        context_above=op.get('context_above'),
-                        context_below=op.get('context_below'),
-                        use_regex=op.get('use_regex', False),
-                        case_sensitive=op.get('case_sensitive'),
-                    )
+                    try:
+                        resolved = _anchor_to_line(
+                            lines, anchor,
+                            occurrence=op.get('occurrence'),
+                            context_above=op.get('context_above'),
+                            context_below=op.get('context_below'),
+                            use_regex=op.get('use_regex', False),
+                            case_sensitive=op.get('case_sensitive'),
+                            require_unique=(op.get('occurrence') is None),
+                        )
+                    except ValueError as e:
+                        report_parts.append(f"  \u274c  {e}")
+                        continue
                     if resolved is None:
                         report_parts.append(f"  \u26a0\ufe0f  anchor '{anchor}' not found")
                         continue
@@ -1043,14 +1357,19 @@ async def edit_file(file_path: str, operations: list[dict]) -> str:
 
                 # anchor 优先于 line/start
                 if anchor:
-                    resolved = _anchor_to_line(
-                        lines, anchor,
-                        occurrence=op.get('occurrence'),
-                        context_above=op.get('context_above'),
-                        context_below=op.get('context_below'),
-                        use_regex=op.get('use_regex', False),
-                        case_sensitive=op.get('case_sensitive'),
-                    )
+                    try:
+                        resolved = _anchor_to_line(
+                            lines, anchor,
+                            occurrence=op.get('occurrence'),
+                            context_above=op.get('context_above'),
+                            context_below=op.get('context_below'),
+                            use_regex=op.get('use_regex', False),
+                            case_sensitive=op.get('case_sensitive'),
+                            require_unique=(op.get('occurrence') is None),
+                        )
+                    except ValueError as e:
+                        report_parts.append(f"  \u274c  {e}")
+                        continue
                     if resolved is None:
                         report_parts.append(f"  \u26a0\ufe0f  anchor '{anchor}' not found")
                         continue

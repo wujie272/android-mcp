@@ -38,39 +38,41 @@ logger = logging.getLogger('termux-mcp.device_info')
 # ── Battery ──
 
 @mcp.tool()
-async def get_battery_status() -> str:
+async def get_battery_status(detailed: bool = False) -> str:
     """Get battery status: level, temperature, charging state, health, voltage, current.
-    
-    Returns JSON. Requires Termux:API. If error, try termux-setup-storage first."""
+
+    Returns JSON. Requires Termux:API. If error, try termux-setup-storage first.
+
+    Args:
+        detailed: 设为 True 则额外获取循环次数/容量等 dumpsys 深度信息（需要 Shizuku/ADB）
+    """
     try:
-        return format_json(await async_termux('termux-battery-status'))
+        raw = await async_termux('termux-battery-status')
+        if not detailed:
+            return format_json(raw)
+        # detailed 模式：合并 dumpsys 深度信息
+        basic = _json.loads(raw)
+        lines = ["🔋 Battery Status:", ""]
+        for k in ('percentage', 'temperature', 'status', 'health', 'source',
+                  'voltage', 'technology', 'current'):
+            v = basic.get(k, '?')
+            lines.append(f"  {k.replace('_', ' ').title():15s} {v}")
+        if privileged_available():
+            r = privileged_shell(
+                "dumpsys batterystats | grep -iE 'cycle|health|capacity' | head -10",
+                timeout=10)
+            if r['success'] and r.get('stdout'):
+                lines.extend(["", "  ── Extra (dumpsys) ──"] +
+                             [f"  {l.strip()}" for l in r['stdout'].split('\n')])
+        else:
+            lines.append("")
+            lines.append("  💡 需要 Shizuku/ADB 才能获取循环次数等深度信息")
+        return "\n".join(lines)
     except Exception as e:
         return err("获取电池状态失败", str(e))
 
 
-@mcp.tool()
-async def get_battery_health() -> str:
-    """Get detailed battery metrics: cycle count, capacity, voltage, etc. via dumpsys."""
-    from termux_mcp.lib.utils import privileged_available, privileged_shell
-    try:
-        raw = await async_termux('termux-battery-status')
-        basic = {}
-        try:
-            basic = _json.loads(raw)
-        except Exception:
-            pass
-        lines = ["🔋 Battery Health Report:", ""]
-        if basic:
-            for k in ('percentage', 'temperature', 'status', 'health', 'source', 'voltage', 'technology', 'current'):
-                v = basic.get(k, '?')
-                lines.append(f"  {k.replace('_',' ').title():15s} {v}")
-        if privileged_available():
-            r = privileged_shell("dumpsys batterystats | grep -iE 'cycle|health|capacity' | head -10", timeout=10)
-            if r['success'] and r.get('stdout'):
-                lines.extend(["", "  ── Detailed (dumpsys) ──"] + [f"  {l.strip()}" for l in r['stdout'].split('\n')])
-        return "\n".join(lines)
-    except Exception as e:
-        return err("获取电池健康信息失败", str(e))
+
 
 
 # ── WiFi ──
